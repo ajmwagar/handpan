@@ -19,14 +19,19 @@ pub struct ModeSpec {
 
 /// Default handpan timbre. The character comes from the harmonically-tuned
 /// octave (2:1) and compound fifth (3:1) — the intervals handpan makers
-/// hand-tune into every note — plus a few inharmonic shimmer modes on top.
+/// hand-tune into every note. The fundamental and octave are each voiced as
+/// a *doublet* a few cents apart: real struck shells split every mode into
+/// two close frequencies, and the resulting slow beating is what makes a
+/// handpan shimmer instead of sounding like a synth bell.
 pub const HANDPAN_TIMBRE: &[ModeSpec] = &[
-    ModeSpec { ratio: 1.00, gain: 1.00, decay: 1.00 }, // fundamental
-    ModeSpec { ratio: 2.00, gain: 0.55, decay: 0.70 }, // octave
-    ModeSpec { ratio: 3.00, gain: 0.32, decay: 0.55 }, // compound fifth
-    ModeSpec { ratio: 4.00, gain: 0.14, decay: 0.40 }, // double octave
-    ModeSpec { ratio: 5.42, gain: 0.09, decay: 0.28 }, // inharmonic shimmer
-    ModeSpec { ratio: 6.79, gain: 0.06, decay: 0.22 }, // inharmonic shimmer
+    ModeSpec { ratio: 1.0000, gain: 0.58, decay: 1.00 }, // fundamental
+    ModeSpec { ratio: 1.0041, gain: 0.52, decay: 1.00 }, // ...split ~+7 cents
+    ModeSpec { ratio: 2.0000, gain: 0.34, decay: 0.70 }, // octave
+    ModeSpec { ratio: 2.0058, gain: 0.30, decay: 0.70 }, // ...split ~+5 cents
+    ModeSpec { ratio: 3.0000, gain: 0.30, decay: 0.55 }, // compound fifth
+    ModeSpec { ratio: 4.0000, gain: 0.13, decay: 0.40 }, // double octave
+    ModeSpec { ratio: 5.4200, gain: 0.09, decay: 0.28 }, // inharmonic shimmer
+    ModeSpec { ratio: 6.7900, gain: 0.06, decay: 0.22 }, // inharmonic shimmer
 ];
 
 struct ModeVoice {
@@ -42,14 +47,28 @@ pub struct NoteVoice {
     exc_len: u32,
     exc_amp: f32,
     exc_vel: f32,
+    // One-pole low-pass on the excitation — the difference between a hard
+    // mallet and a soft fingertip attack.
+    lp: f32,
+    lp_a: f32,
     rng: Rng,
 }
 
 impl NoteVoice {
-    pub fn new(freq: f32, t60_base: f32, timbre: &[ModeSpec], fs: f32, seed: u32) -> Self {
+    /// `tune_mult` applies a per-note fabrication detune (a real set of hammered
+    /// notes is never mathematically perfect); pass 1.0 for exact tuning.
+    pub fn new(
+        freq: f32,
+        t60_base: f32,
+        timbre: &[ModeSpec],
+        fs: f32,
+        seed: u32,
+        tune_mult: f32,
+    ) -> Self {
+        let f0 = freq * tune_mult;
         let mut modes = Vec::with_capacity(timbre.len());
         for m in timbre {
-            let f = freq * m.ratio;
+            let f = f0 * m.ratio;
             // Drop partials that would alias above Nyquist.
             if f >= fs * 0.49 {
                 continue;
@@ -58,12 +77,16 @@ impl NoteVoice {
             res.set(f, t60_base * m.decay, m.gain, fs);
             modes.push(ModeVoice { res, ratio: m.ratio });
         }
+        // ~5.5 kHz attack low-pass.
+        let lp_a = 1.0 - mathf::exp(-core::f32::consts::TAU * 5500.0 / fs);
         Self {
             modes,
             exc_remaining: 0,
             exc_len: (0.004 * fs) as u32, // ~4 ms hand-strike burst
             exc_amp: 0.0,
             exc_vel: 0.0,
+            lp: 0.0,
+            lp_a,
             rng: Rng::new(seed),
         }
     }
@@ -74,13 +97,13 @@ impl NoteVoice {
         // Keep the louder of an in-flight strike and this one, so soft
         // sympathetic excitation never stomps a hard direct hit.
         self.exc_amp = self.exc_amp.max(v);
-        self.exc_vel = v;
+        self.exc_vel = self.exc_vel.max(v);
         self.exc_remaining = self.exc_len;
     }
 
     #[inline]
     pub fn process(&mut self) -> f32 {
-        let exc = if self.exc_remaining > 0 {
+        let raw = if self.exc_remaining > 0 {
             let n = self.exc_len - self.exc_remaining;
             let t = n as f32 / self.exc_len as f32;
             let env = mathf::exp(-6.0 * t);
@@ -91,6 +114,9 @@ impl NoteVoice {
         } else {
             0.0
         };
+        // Soften the attack; a fingertip is not a click.
+        self.lp += self.lp_a * (raw - self.lp);
+        let exc = self.lp;
 
         let mut sum = 0.0;
         for m in &mut self.modes {
@@ -98,6 +124,12 @@ impl NoteVoice {
             // partials — the "bloom" of a struck shell.
             let w = 1.0 + self.exc_vel * (m.ratio - 1.0) * 0.12;
             sum += m.res.process(exc * w);
+        }
+
+        // Decay the brightness state once the burst is spent.
+        if self.exc_remaining == 0 {
+            self.exc_vel *= 0.999;
+            self.exc_amp = 0.0;
         }
         sum
     }
