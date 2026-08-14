@@ -1,0 +1,24 @@
+[package]
+name = "handpan-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Avery Wagar"]
+description = "Modal physical-modeling synthesis core for polyphonic handpans"
+license-file = "../../LICENSE"
+publish = false
+
+[features]
+default = ["std"]
+# Host builds (VSTi, tests, WAV rendering): use libstd math.
+std = []
+# Embedded / firmware builds: no_std + alloc, transcendentals via libm.
+# Enable with `--no-default-features --features libm` and add the libm dep.
+libm = []
+
+[dependencies]
+# Intentionally none. The voice core is self-contained IP with zero
+# third-party code so it can be licensed and shipped without encumbrance.
+
+[[example]]
+name = "render_wav"
+required-features = ["std"]

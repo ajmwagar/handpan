@@ -1,0 +1,6 @@
+[workspace]
+resolver = "2"
+members = ["crates/handpan-core"]
+
+[profile.release]
+lto = "thin"
