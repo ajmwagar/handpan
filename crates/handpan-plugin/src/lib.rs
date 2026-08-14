@@ -30,6 +30,12 @@ enum ScaleChoice {
     #[id = "d_major_9"]
     #[name = "D Major 9"]
     DMajor9,
+    #[id = "d_hijaz_kar_9"]
+    #[name = "D Hijaz Kar 9"]
+    DHijazKar9,
+    #[id = "d_insen_9"]
+    #[name = "D Insen 9"]
+    DInsen9,
 }
 
 impl ScaleChoice {
@@ -41,6 +47,8 @@ impl ScaleChoice {
             ScaleChoice::DHijaz9 => Scale::DHijaz9,
             ScaleChoice::DMinorPentatonic9 => Scale::DMinorPentatonic9,
             ScaleChoice::DMajor9 => Scale::DMajor9,
+            ScaleChoice::DHijazKar9 => Scale::DHijazKar9,
+            ScaleChoice::DInsen9 => Scale::DInsen9,
         }
     }
 }

@@ -39,6 +39,15 @@ pub const D_MINOR_PENTATONIC_9_MIDI: &[f32] =
 /// D Major 9 — a bright major layout. D3 ding with A3 D4 E4 F♯4 G4 A4 B4 C♯5.
 pub const D_MAJOR_9_MIDI: &[f32] = &[50.0, 57.0, 62.0, 64.0, 66.0, 67.0, 69.0, 71.0, 73.0];
 
+/// D Hijaz Kar 9 — double-harmonic / Byzantine (1 ♭2 3 4 5 ♭6 7): even more
+/// dramatic than Hijaz, with two augmented-second steps. D3 ding with
+/// A3 B♭3 C♯4 D4 E♭4 F♯4 G4 A4.
+pub const D_HIJAZ_KAR_9_MIDI: &[f32] = &[50.0, 57.0, 58.0, 61.0, 62.0, 63.0, 66.0, 67.0, 69.0];
+
+/// D Insen 9 — Japanese pentatonic (1 ♭2 4 5 ♭7): sparse and haunting.
+/// D3 ding with A3 C4 D4 E♭4 G4 A4 C5 D5.
+pub const D_INSEN_9_MIDI: &[f32] = &[50.0, 57.0, 60.0, 62.0, 63.0, 67.0, 69.0, 72.0, 74.0];
+
 /// A named or custom handpan tuning.
 #[derive(Clone)]
 pub enum Scale {
@@ -48,6 +57,8 @@ pub enum Scale {
     DHijaz9,
     DMinorPentatonic9,
     DMajor9,
+    DHijazKar9,
+    DInsen9,
     /// Arbitrary tuning as MIDI note numbers, ding first.
     Custom(Vec<f32>),
 }
@@ -62,12 +73,14 @@ impl Scale {
             Scale::DHijaz9 => D_HIJAZ_9_MIDI.to_owned(),
             Scale::DMinorPentatonic9 => D_MINOR_PENTATONIC_9_MIDI.to_owned(),
             Scale::DMajor9 => D_MAJOR_9_MIDI.to_owned(),
+            Scale::DHijazKar9 => D_HIJAZ_KAR_9_MIDI.to_owned(),
+            Scale::DInsen9 => D_INSEN_9_MIDI.to_owned(),
             Scale::Custom(m) => m.clone(),
         }
     }
 
     /// All named tunings (excludes `Custom`), for enumerating in a UI.
-    pub fn all_named() -> [Scale; 6] {
+    pub fn all_named() -> [Scale; 8] {
         [
             Scale::DKurd9,
             Scale::DCelticMinor9,
@@ -75,6 +88,8 @@ impl Scale {
             Scale::DHijaz9,
             Scale::DMinorPentatonic9,
             Scale::DMajor9,
+            Scale::DHijazKar9,
+            Scale::DInsen9,
         ]
     }
 
@@ -87,6 +102,8 @@ impl Scale {
             Scale::DHijaz9 => "D Hijaz 9",
             Scale::DMinorPentatonic9 => "D Minor Pentatonic 9",
             Scale::DMajor9 => "D Major 9",
+            Scale::DHijazKar9 => "D Hijaz Kar 9",
+            Scale::DInsen9 => "D Insen 9",
             Scale::Custom(_) => "Custom",
         }
     }

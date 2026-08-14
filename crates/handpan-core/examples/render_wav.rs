@@ -12,9 +12,11 @@ use handpan_core::{scale::Scale, Build, Handpan, Size};
 const FS: f32 = 48_000.0;
 
 fn main() -> std::io::Result<()> {
-    render("handpan_demo.wav", &Scale::DKurd9, Build::Handpan, Size::Standard)?;
+    // Lead with the moody/exotic scales.
     render("handpan_hijaz.wav", &Scale::DHijaz9, Build::Handpan, Size::Large)?;
-    render("handpan_csharp_kurd.wav", &Scale::CshKurd9, Build::Handpan, Size::Standard)?;
+    render("handpan_hijaz_kar.wav", &Scale::DHijazKar9, Build::Handpan, Size::Large)?;
+    render("handpan_insen.wav", &Scale::DInsen9, Build::Handpan, Size::Standard)?;
+    render("handpan_kurd.wav", &Scale::DKurd9, Build::Handpan, Size::Standard)?;
     render("tongue_drum.wav", &Scale::DCelticMinor9, Build::TongueDrum, Size::Small)?;
     Ok(())
 }
