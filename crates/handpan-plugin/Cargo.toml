@@ -1,0 +1,15 @@
+[package]
+name = "handpan-plugin"
+version = "0.1.0"
+edition = "2021"
+authors = ["Avery Wagar"]
+description = "Puget Handpan — VST3/CLAP instrument wrapping the handpan-core modal voice"
+license-file = "../../LICENSE"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+handpan-core = { path = "../handpan-core" }
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }

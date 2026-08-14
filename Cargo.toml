@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/handpan-core"]
+members = ["crates/handpan-core", "crates/handpan-plugin", "xtask"]
 
 [profile.release]
 lto = "thin"
