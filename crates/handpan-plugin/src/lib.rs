@@ -18,6 +18,18 @@ enum ScaleChoice {
     #[id = "d_celtic_minor_9"]
     #[name = "D Celtic Minor 9"]
     DCelticMinor9,
+    #[id = "csh_kurd_9"]
+    #[name = "C# Kurd 9"]
+    CshKurd9,
+    #[id = "d_hijaz_9"]
+    #[name = "D Hijaz 9"]
+    DHijaz9,
+    #[id = "d_minor_pentatonic_9"]
+    #[name = "D Minor Pentatonic 9"]
+    DMinorPentatonic9,
+    #[id = "d_major_9"]
+    #[name = "D Major 9"]
+    DMajor9,
 }
 
 impl ScaleChoice {
@@ -25,6 +37,10 @@ impl ScaleChoice {
         match self {
             ScaleChoice::DKurd9 => Scale::DKurd9,
             ScaleChoice::DCelticMinor9 => Scale::DCelticMinor9,
+            ScaleChoice::CshKurd9 => Scale::CshKurd9,
+            ScaleChoice::DHijaz9 => Scale::DHijaz9,
+            ScaleChoice::DMinorPentatonic9 => Scale::DMinorPentatonic9,
+            ScaleChoice::DMajor9 => Scale::DMajor9,
         }
     }
 }
@@ -89,10 +105,14 @@ struct HandpanParams {
     body: FloatParam,
     #[id = "scale"]
     scale: EnumParam<ScaleChoice>,
+    #[id = "air"]
+    air: FloatParam,
     #[id = "build"]
     build: EnumParam<BuildChoice>,
     #[id = "size"]
     size: EnumParam<SizeChoice>,
+    #[id = "damp_on_release"]
+    damp_on_release: BoolParam,
 }
 
 impl Default for HandpanParams {
@@ -115,9 +135,12 @@ impl Default for HandpanParams {
                 .with_smoother(SmoothingStyle::Linear(20.0)),
             sustain: FloatParam::new("Sustain", 1.0, FloatRange::Linear { min: 0.3, max: 2.0 }),
             body: FloatParam::new("Body", 0.12, FloatRange::Linear { min: 0.0, max: 0.5 }),
+            air: FloatParam::new("Air", 0.16, FloatRange::Linear { min: 0.0, max: 0.6 })
+                .with_smoother(SmoothingStyle::Linear(30.0)),
             scale: EnumParam::new("Scale", ScaleChoice::DKurd9),
             build: EnumParam::new("Build", BuildChoice::Handpan),
             size: EnumParam::new("Size", SizeChoice::Standard),
+            damp_on_release: BoolParam::new("Damp on Release", false),
         }
     }
 }
@@ -250,6 +273,8 @@ impl Plugin for HandpanPlugin {
         // (nearest_field, params) without aliasing a mutable borrow.
         let mut engine = self.engine.take().unwrap();
         engine.set_coupling(self.params.coupling.value());
+        engine.set_air(self.params.air.value());
+        let damp_on_release = self.params.damp_on_release.value();
 
         let mut next_event = context.next_event();
         for (sample_id, mut channels) in buffer.iter_samples().enumerate() {
@@ -258,10 +283,18 @@ impl Plugin for HandpanPlugin {
                 if event.timing() as usize != sample_id {
                     break;
                 }
-                if let NoteEvent::NoteOn { note, velocity, .. } = event {
-                    if let Some(field) = self.nearest_field(note) {
-                        engine.strike(field, velocity);
+                match event {
+                    NoteEvent::NoteOn { note, velocity, .. } => {
+                        if let Some(field) = self.nearest_field(note) {
+                            engine.strike(field, velocity);
+                        }
                     }
+                    NoteEvent::NoteOff { note, .. } if damp_on_release => {
+                        if let Some(field) = self.nearest_field(note) {
+                            engine.damp(field);
+                        }
+                    }
+                    _ => {}
                 }
                 next_event = context.next_event();
             }

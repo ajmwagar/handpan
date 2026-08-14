@@ -38,6 +38,14 @@ impl Resonator {
         y
     }
 
+    /// Bleed energy out of the resonator (a hand resting on the field). Called
+    /// per sample with a factor just below 1.0 for a fast, natural mute.
+    #[inline]
+    pub fn damp_state(&mut self, factor: f32) {
+        self.y1 *= factor;
+        self.y2 *= factor;
+    }
+
     #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.y1 = 0.0;

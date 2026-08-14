@@ -26,6 +26,7 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+mod air;
 mod mathf;
 mod note;
 mod preset;
@@ -38,11 +39,13 @@ pub use note::{ModeSpec, HANDPAN_TIMBRE, TONGUE_DRUM_TIMBRE};
 pub use preset::{Build, Size, VoiceProfile};
 pub use scale::Scale;
 
+use air::Air;
 use note::NoteVoice;
 use resonator::Resonator;
 
 /// A polyphonic handpan / tongue drum: a ring of tone fields with sympathetic
-/// coupling, a shared shell resonance, and per-note stereo placement.
+/// coupling, a shared shell resonance, room ambience, and per-note stereo
+/// placement.
 pub struct Handpan {
     fs: f32,
     notes: Vec<NoteVoice>,
@@ -53,6 +56,8 @@ pub struct Handpan {
     body: Resonator,
     body_amount: f32,
     body_exc: f32,
+    air: Air,
+    air_wet: f32,
 }
 
 impl Handpan {
@@ -72,7 +77,8 @@ impl Handpan {
         let mut notes = Vec::with_capacity(n);
         let mut pan = Vec::with_capacity(n);
         for (i, &f) in freqs.iter().enumerate() {
-            let t60_base = (7.0 * (146.83 / f)).clamp(1.2, 9.0);
+            // Longer, premium-length sustain; lower notes ring longest.
+            let t60_base = (8.5 * (150.0 / f)).clamp(1.6, 11.0);
 
             let mut r = rng::Rng::new(profile.seed ^ (0x9E37_79B9u32.wrapping_mul(i as u32 + 1)));
             let cents = r.next_bipolar() * profile.detune_cents;
@@ -103,6 +109,8 @@ impl Handpan {
             body,
             body_amount: profile.body,
             body_exc: 0.0,
+            air: Air::new(fs),
+            air_wet: profile.air,
         }
     }
 
@@ -119,6 +127,25 @@ impl Handpan {
     /// Set the sympathetic-coupling amount (0 = dry).
     pub fn set_coupling(&mut self, amount: f32) {
         self.coupling = amount.clamp(0.0, 0.5);
+    }
+
+    /// Set the room-ambience ("Air") wet level (0 = dry).
+    pub fn set_air(&mut self, wet: f32) {
+        self.air_wet = wet.clamp(0.0, 1.0);
+    }
+
+    /// Rest a hand on tone field `index` — a fast, natural mute.
+    pub fn damp(&mut self, index: usize) {
+        if let Some(n) = self.notes.get_mut(index) {
+            n.damp();
+        }
+    }
+
+    /// Mute every tone field.
+    pub fn damp_all(&mut self) {
+        for n in &mut self.notes {
+            n.damp();
+        }
     }
 
     /// Strike tone field `index` with `velocity` in [0, 1]. Neighbouring fields
@@ -153,7 +180,14 @@ impl Handpan {
         }
         let b = self.body.process(self.body_exc) * self.body_amount;
         self.body_exc = 0.0;
-        (l + b, r + b)
+        let (mut dl, mut dr) = (l + b, r + b);
+
+        if self.air_wet > 1e-4 {
+            let (wl, wr) = self.air.process(dl, dr);
+            dl += wl * self.air_wet;
+            dr += wr * self.air_wet;
+        }
+        (dl, dr)
     }
 }
 
@@ -211,6 +245,46 @@ mod tests {
             peak = peak.max(l.abs().max(r.abs()));
         }
         assert!(peak > 0.01, "no sound produced");
+    }
+
+    #[test]
+    fn air_and_full_strike_stay_bounded() {
+        // Hit everything hard with ambience on and make sure nothing blows up.
+        let mut hp = Handpan::from_preset(48_000.0, &Scale::DKurd9, Build::Handpan, Size::Large);
+        for n in 0..hp.note_count() {
+            hp.strike(n, 1.0);
+        }
+        let mut peak = 0.0f32;
+        for i in 0..48_000 * 12 {
+            let (l, r) = hp.process();
+            assert!(l.is_finite() && r.is_finite(), "non-finite at {i}");
+            peak = peak.max(l.abs().max(r.abs()));
+        }
+        assert!(peak < 100.0, "runaway feedback: peak {peak}");
+    }
+
+    #[test]
+    fn damping_kills_the_ring() {
+        let mut hp = Handpan::new(48_000.0, &scale::d_kurd_9());
+        hp.strike(0, 1.0);
+        for _ in 0..48_000 {
+            hp.process(); // let it ring 1s
+        }
+        let mut before = 0.0f32;
+        for _ in 0..2_400 {
+            let (l, _) = hp.process();
+            before = before.max(l.abs());
+        }
+        hp.damp_all();
+        for _ in 0..24_000 {
+            hp.process(); // 0.5s of muting
+        }
+        let mut after = 0.0f32;
+        for _ in 0..2_400 {
+            let (l, _) = hp.process();
+            after = after.max(l.abs());
+        }
+        assert!(after < before * 0.1, "mute did not silence ({before} -> {after})");
     }
 
     #[test]

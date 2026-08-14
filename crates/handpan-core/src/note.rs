@@ -79,6 +79,9 @@ pub struct NoteVoice {
     bloom_peak: f32,  // cents at full velocity
     bloom_decay: f32, // per-control-block decay factor
     ctl: u32,
+    // Hand-mute: when damping, bleed resonator energy each sample.
+    damping: bool,
+    damp_coef: f32,
     rng: Rng,
 }
 
@@ -127,19 +130,31 @@ impl NoteVoice {
             bloom_peak: profile.bloom_cents,
             bloom_decay,
             ctl: 0,
+            damping: false,
+            // ~90 ms mute at 48 kHz; recomputed for fs below.
+            damp_coef: mathf::exp(-1.0 / (0.09 * fs)),
             rng: Rng::new(seed),
         }
     }
 
     /// Trigger a strike. `velocity` in [0, 1] sets loudness, brightness, and
-    /// bloom depth.
+    /// bloom depth. Each strike varies slightly so repeats never sound
+    /// machine-gunned.
     pub fn strike(&mut self, velocity: f32) {
         let v = velocity.clamp(0.0, 1.0);
-        self.exc_amp = self.exc_amp.max(v);
+        self.damping = false; // a strike lifts the hand
+        // Per-strike micro-variation in level and bloom depth.
+        let jitter_amp = 1.0 + 0.06 * self.rng.next_bipolar();
+        let jitter_bloom = 1.0 + 0.15 * self.rng.next_bipolar();
+        self.exc_amp = self.exc_amp.max(v * jitter_amp);
         self.exc_vel = self.exc_vel.max(v);
         self.exc_remaining = self.exc_len.max(1);
-        // A harder hit blooms sharper; keep the larger of any in-flight bloom.
-        self.bloom_cur = self.bloom_cur.max(v * self.bloom_peak);
+        self.bloom_cur = self.bloom_cur.max(v * self.bloom_peak * jitter_bloom);
+    }
+
+    /// Rest a hand on the field — a fast, natural mute.
+    pub fn damp(&mut self) {
+        self.damping = true;
     }
 
     #[inline]
@@ -160,6 +175,9 @@ impl NoteVoice {
 
         let mut sum = 0.0;
         for m in &mut self.modes {
+            if self.damping {
+                m.res.damp_state(self.damp_coef);
+            }
             let w = 1.0 + self.exc_vel * (m.ratio - 1.0) * 0.12;
             sum += m.res.process(exc * w);
         }

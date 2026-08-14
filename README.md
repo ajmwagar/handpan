@@ -11,6 +11,13 @@ sympathetic coupling, and a shell resonance. The voice is dependency-free and
 **Presets** are `build × size`: a dimpled/domed **Handpan** or a cut
 **Tongue Drum**, each in Small / Standard / Large / Bass. See `VoiceProfile`.
 
+**Scales**: D Kurd, D Celtic Minor, C# Kurd, D Hijaz, D Minor Pentatonic,
+D Major (all 9-note), plus `Scale::Custom` for any MIDI tuning.
+
+**Playability**: hand-mute damping (`damp`/`damp_all`, exposed as "Damp on
+Release"), a built-in room "Air" ambience, and per-strike micro-variation so
+repeats never sound mechanical.
+
 ## Layout
 
 | Crate | What it is |

@@ -61,6 +61,9 @@ pub struct VoiceProfile {
     pub coupling: f32,
     /// Per-note fabrication detune spread (cents).
     pub detune_cents: f32,
+    /// Built-in room ambience ("Air") wet level — the space premium demos are
+    /// recorded in (0 = dry).
+    pub air: f32,
     /// Seed for deterministic per-note noise and detune.
     pub seed: u32,
 }
@@ -71,7 +74,7 @@ impl VoiceProfile {
         let base = match build {
             Build::Handpan => VoiceProfile {
                 timbre: HANDPAN_TIMBRE,
-                decay_scale: 1.0,
+                decay_scale: 1.15,
                 brightness: 1.0,
                 attack_cutoff_hz: 5500.0,
                 attack_ms: 4.0,
@@ -80,8 +83,9 @@ impl VoiceProfile {
                 body_freq: 62.0,
                 body_decay: 0.5,
                 body: 0.12,
-                coupling: 0.06,
+                coupling: 0.07,
                 detune_cents: 3.0,
+                air: 0.16,
                 seed: 0x1234_5678,
             },
             Build::TongueDrum => VoiceProfile {
@@ -97,6 +101,7 @@ impl VoiceProfile {
                 body: 0.06,
                 coupling: 0.015,
                 detune_cents: 1.5,
+                air: 0.10,
                 seed: 0x1234_5678,
             },
         };
