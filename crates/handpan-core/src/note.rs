@@ -59,6 +59,8 @@ struct ModeVoice {
     ratio: f32,
     /// Whether this mode participates in the pitch bloom (low partials only).
     bloom: bool,
+    /// Whether this is a fundamental partial (drives the nonlinearity).
+    is_fund: bool,
 }
 
 /// A struck tone field. `process()` advances one sample; `strike()` injects a
@@ -82,6 +84,12 @@ pub struct NoteVoice {
     // Hand-mute: when damping, bleed resonator energy each sample.
     damping: bool,
     damp_coef: f32,
+    // Geometric-nonlinearity harmonic generation: the fundamental pumps the
+    // octave (quadratic) and fifth (cubic), so hard strikes bloom brighter —
+    // the "distortion process" measured in handpans/steelpans.
+    nonlin: f32,
+    dc_x1: f32,
+    dc_y1: f32,
     rng: Rng,
 }
 
@@ -110,6 +118,7 @@ impl NoteVoice {
                 gain,
                 ratio: m.ratio,
                 bloom: m.ratio <= 2.1,
+                is_fund: m.ratio <= 1.05,
             });
         }
 
@@ -133,6 +142,9 @@ impl NoteVoice {
             damping: false,
             // ~90 ms mute at 48 kHz; recomputed for fs below.
             damp_coef: mathf::exp(-1.0 / (0.09 * fs)),
+            nonlin: profile.nonlin,
+            dc_x1: 0.0,
+            dc_y1: 0.0,
             rng: Rng::new(seed),
         }
     }
@@ -174,13 +186,32 @@ impl NoteVoice {
         let exc = self.lp;
 
         let mut sum = 0.0;
+        let mut fund = 0.0;
         for m in &mut self.modes {
             if self.damping {
                 m.res.damp_state(self.damp_coef);
             }
             let w = 1.0 + self.exc_vel * (m.ratio - 1.0) * 0.12;
-            sum += m.res.process(exc * w);
+            let y = m.res.process(exc * w);
+            sum += y;
+            if m.is_fund {
+                fund += y;
+            }
         }
+
+        // Geometric nonlinearity (the "distortion process"): waveshape the
+        // fundamental into octave (f²) and twelfth (f³) content and mix it to
+        // the output. Amplitude-dependent, so hard strikes bloom brighter, and
+        // bounded — no resonant runaway. K_OCTAVE/K_FIFTH tag which tuned modes
+        // the same harmonics reinforce perceptually.
+        let f = fund.clamp(-3.0, 3.0);
+        sum += self.nonlin * (f * f + f * f * f);
+
+        // Block the DC the squared term introduces (one-pole high-pass).
+        let out = sum - self.dc_x1 + 0.999 * self.dc_y1;
+        self.dc_x1 = sum;
+        self.dc_y1 = out;
+        let sum = out;
 
         // Control-rate pitch-bloom retune of the low partials.
         self.ctl += 1;

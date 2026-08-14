@@ -57,6 +57,10 @@ pub struct VoiceProfile {
     pub body_decay: f32,
     /// Body-resonance level.
     pub body: f32,
+    /// Geometric-nonlinearity amount: how strongly the fundamental generates
+    /// octave/fifth energy on hard strikes (the "distortion process" measured
+    /// in handpans/steelpans). 0 = purely linear.
+    pub nonlin: f32,
     /// Sympathetic coupling — the halo (0 = dry).
     pub coupling: f32,
     /// Per-note fabrication detune spread (cents).
@@ -80,9 +84,11 @@ impl VoiceProfile {
                 attack_ms: 4.0,
                 bloom_cents: 14.0,
                 bloom_ms: 120.0,
-                body_freq: 62.0,
+                // Center "gu" Helmholtz cavity ≈ 82 Hz (Rossing et al., 2007).
+                body_freq: 82.0,
                 body_decay: 0.5,
                 body: 0.12,
+                nonlin: 0.18,
                 coupling: 0.07,
                 detune_cents: 3.0,
                 air: 0.16,
@@ -96,9 +102,10 @@ impl VoiceProfile {
                 attack_ms: 3.0,
                 bloom_cents: 6.0,
                 bloom_ms: 70.0,
-                body_freq: 90.0,
+                body_freq: 95.0,
                 body_decay: 0.3,
                 body: 0.06,
+                nonlin: 0.05,
                 coupling: 0.015,
                 detune_cents: 1.5,
                 air: 0.10,
