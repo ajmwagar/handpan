@@ -28,6 +28,7 @@ use alloc::vec::Vec;
 
 mod air;
 mod mathf;
+mod modular;
 mod note;
 mod preset;
 mod resonator;
@@ -35,6 +36,7 @@ mod rng;
 
 pub mod scale;
 
+pub use modular::{HandpanInstrument, PlayMode};
 pub use note::{ModeSpec, HANDPAN_TIMBRE, TONGUE_DRUM_TIMBRE};
 pub use preset::{Build, Size, VoiceProfile};
 pub use scale::Scale;

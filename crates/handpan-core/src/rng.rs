@@ -26,4 +26,10 @@ impl Rng {
     pub fn next_bipolar(&mut self) -> f32 {
         (self.next_u32() as f32 / u32::MAX as f32) * 2.0 - 1.0
     }
+
+    /// Uniform value in [0.0, 1.0].
+    #[inline]
+    pub fn next_unit(&mut self) -> f32 {
+        self.next_u32() as f32 / u32::MAX as f32
+    }
 }
