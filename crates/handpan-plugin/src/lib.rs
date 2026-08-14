@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use handpan_core::{scale::Scale, Handpan, HandpanConfig};
+use handpan_core::{scale::Scale, Build, Handpan, Size, VoiceProfile};
 use nih_plug::prelude::*;
 
 /// Named tunings exposed as a host parameter.
@@ -29,6 +29,54 @@ impl ScaleChoice {
     }
 }
 
+/// Instrument build: dimpled handpan vs. cut steel tongue drum.
+#[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
+enum BuildChoice {
+    #[id = "handpan"]
+    #[name = "Handpan (dimpled)"]
+    Handpan,
+    #[id = "tongue_drum"]
+    #[name = "Tongue Drum (cut)"]
+    TongueDrum,
+}
+
+impl BuildChoice {
+    fn to_build(self) -> Build {
+        match self {
+            BuildChoice::Handpan => Build::Handpan,
+            BuildChoice::TongueDrum => Build::TongueDrum,
+        }
+    }
+}
+
+/// Instrument size / tongue size.
+#[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
+enum SizeChoice {
+    #[id = "small"]
+    #[name = "Small"]
+    Small,
+    #[id = "standard"]
+    #[name = "Standard"]
+    Standard,
+    #[id = "large"]
+    #[name = "Large"]
+    Large,
+    #[id = "bass"]
+    #[name = "Bass"]
+    Bass,
+}
+
+impl SizeChoice {
+    fn to_size(self) -> Size {
+        match self {
+            SizeChoice::Small => Size::Small,
+            SizeChoice::Standard => Size::Standard,
+            SizeChoice::Large => Size::Large,
+            SizeChoice::Bass => Size::Bass,
+        }
+    }
+}
+
 #[derive(Params)]
 struct HandpanParams {
     #[id = "gain"]
@@ -41,6 +89,10 @@ struct HandpanParams {
     body: FloatParam,
     #[id = "scale"]
     scale: EnumParam<ScaleChoice>,
+    #[id = "build"]
+    build: EnumParam<BuildChoice>,
+    #[id = "size"]
+    size: EnumParam<SizeChoice>,
 }
 
 impl Default for HandpanParams {
@@ -64,6 +116,8 @@ impl Default for HandpanParams {
             sustain: FloatParam::new("Sustain", 1.0, FloatRange::Linear { min: 0.3, max: 2.0 }),
             body: FloatParam::new("Body", 0.12, FloatRange::Linear { min: 0.0, max: 0.5 }),
             scale: EnumParam::new("Scale", ScaleChoice::DKurd9),
+            build: EnumParam::new("Build", BuildChoice::Handpan),
+            size: EnumParam::new("Size", SizeChoice::Standard),
         }
     }
 }
@@ -74,8 +128,10 @@ struct HandpanPlugin {
     sample_rate: f32,
     /// MIDI note numbers of the current tone fields, ding first.
     notes_midi: Vec<f32>,
-    /// Config the current engine was built with, to detect rebuilds.
+    /// Settings the current engine was built with, to detect rebuilds.
     built_scale: ScaleChoice,
+    built_build: BuildChoice,
+    built_size: SizeChoice,
     built_sustain: f32,
     built_body: f32,
 }
@@ -88,6 +144,8 @@ impl Default for HandpanPlugin {
             sample_rate: 48_000.0,
             notes_midi: Vec::new(),
             built_scale: ScaleChoice::DKurd9,
+            built_build: BuildChoice::Handpan,
+            built_size: SizeChoice::Standard,
             built_sustain: f32::NAN,
             built_body: f32::NAN,
         }
@@ -95,21 +153,28 @@ impl Default for HandpanPlugin {
 }
 
 impl HandpanPlugin {
-    /// Rebuild the voice from the current scale/sustain/body parameters.
+    /// Rebuild the voice from the current build/size/scale/sustain/body params.
     fn rebuild(&mut self) {
-        let choice = self.params.scale.value();
-        let scale = choice.to_scale();
-        let cfg = HandpanConfig {
-            coupling: self.params.coupling.value(),
-            sustain: self.params.sustain.value(),
-            body: self.params.body.value(),
-            ..HandpanConfig::default()
-        };
+        let scale_c = self.params.scale.value();
+        let build_c = self.params.build.value();
+        let size_c = self.params.size.value();
+        let scale = scale_c.to_scale();
+        let sustain = self.params.sustain.value();
+        let body = self.params.body.value();
+
+        // Start from the named preset, then apply the live tone knobs.
+        let mut profile = VoiceProfile::preset(build_c.to_build(), size_c.to_size());
+        profile.decay_scale *= sustain;
+        profile.body = body;
+        profile.coupling = self.params.coupling.value();
+
         self.notes_midi = scale.midi();
-        self.engine = Some(Handpan::from_scale(self.sample_rate, &scale, cfg));
-        self.built_scale = choice;
-        self.built_sustain = cfg.sustain;
-        self.built_body = cfg.body;
+        self.engine = Some(Handpan::with_profile(self.sample_rate, &scale.freqs(), &profile));
+        self.built_scale = scale_c;
+        self.built_build = build_c;
+        self.built_size = size_c;
+        self.built_sustain = sustain;
+        self.built_body = body;
     }
 
     /// Index of the tone field nearest a MIDI note number.
@@ -174,6 +239,8 @@ impl Plugin for HandpanPlugin {
         // Rebuild if a bake-time parameter changed since the last block.
         if self.engine.is_none()
             || self.params.scale.value() != self.built_scale
+            || self.params.build.value() != self.built_build
+            || self.params.size.value() != self.built_size
             || (self.params.sustain.value() - self.built_sustain).abs() > 1e-6
             || (self.params.body.value() - self.built_body).abs() > 1e-6
         {

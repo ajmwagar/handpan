@@ -3,9 +3,13 @@
 Modal physical-modeling handpan — a VSTi and modular-firmware instrument.
 
 The sound is generated, not sampled: each tone field is a bank of tuned modal
-resonators with harmonic octave/fifth tuning, mode-split shimmer, sympathetic
-coupling, and a shell resonance. The voice is dependency-free and `no_std`-ready
-so the same DSP compiles to both a plugin and embedded firmware.
+resonators with harmonic octave/fifth tuning, mode-split shimmer, an
+amplitude-dependent pitch bloom, a metallic attack transient, harmonic-weighted
+sympathetic coupling, and a shell resonance. The voice is dependency-free and
+`no_std`-ready so the same DSP compiles to both a plugin and embedded firmware.
+
+**Presets** are `build × size`: a dimpled/domed **Handpan** or a cut
+**Tongue Drum**, each in Small / Standard / Large / Bass. See `VoiceProfile`.
 
 ## Layout
 

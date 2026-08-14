@@ -26,6 +26,12 @@ pub fn powf(a: f32, b: f32) -> f32 {
     a.powf(b)
 }
 
+#[cfg(feature = "std")]
+#[inline]
+pub fn log2(x: f32) -> f32 {
+    x.log2()
+}
+
 #[cfg(all(not(feature = "std"), feature = "libm"))]
 #[inline]
 pub fn sin(x: f32) -> f32 {
@@ -48,4 +54,10 @@ pub fn exp(x: f32) -> f32 {
 #[inline]
 pub fn powf(a: f32, b: f32) -> f32 {
     libm::powf(a, b)
+}
+
+#[cfg(all(not(feature = "std"), feature = "libm"))]
+#[inline]
+pub fn log2(x: f32) -> f32 {
+    libm::log2f(x)
 }
