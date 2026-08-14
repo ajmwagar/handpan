@@ -22,3 +22,6 @@ target
 
 # Rendered audio demos
 *.wav
+
+# Third-party analysis recordings (not ours to redistribute)
+/data/

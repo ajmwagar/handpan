@@ -78,7 +78,7 @@ impl VoiceProfile {
         let base = match build {
             Build::Handpan => VoiceProfile {
                 timbre: HANDPAN_TIMBRE,
-                decay_scale: 1.15,
+                decay_scale: 1.0,
                 brightness: 1.0,
                 attack_cutoff_hz: 5500.0,
                 attack_ms: 4.0,

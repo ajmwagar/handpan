@@ -19,22 +19,26 @@ pub struct ModeSpec {
     pub decay: f32,
 }
 
-/// Dimpled/domed handpan tone field. The character is the harmonically-tuned
-/// octave (2:1) and compound fifth (3:1) makers hammer into every note. The
-/// fundamental and octave are voiced as detuned doublets so the mode splitting
-/// of a struck shell produces slow beating/shimmer, and two fast high modes
-/// give the metallic attack "tak".
+/// Dimpled/domed handpan tone field. Measured-informed: partial ratios, gains,
+/// and decays come from analysis of real handpan recordings (see
+/// `docs/measured_modes.md`). The defining correction over a naive model is
+/// that the **octave and compound fifth ring ~1.7–2× longer than the
+/// fundamental** — the fundamental fades first while the upper partials sing,
+/// which is the sustained shimmer of a good handpan. The fundamental, octave,
+/// and fifth are voiced as detuned doublets because real shells split those
+/// modes (measured), giving the slow beating; two fast high modes give the
+/// metallic attack "tak".
 pub const HANDPAN_TIMBRE: &[ModeSpec] = &[
-    ModeSpec { ratio: 1.0000, gain: 0.58, decay: 1.00 }, // fundamental
-    ModeSpec { ratio: 1.0041, gain: 0.52, decay: 1.00 }, // ...split ~+7 cents
-    ModeSpec { ratio: 2.0000, gain: 0.34, decay: 0.72 }, // octave
-    ModeSpec { ratio: 2.0055, gain: 0.30, decay: 0.72 }, // ...split ~+5 cents
-    ModeSpec { ratio: 3.0000, gain: 0.30, decay: 0.55 }, // compound fifth
-    ModeSpec { ratio: 4.0000, gain: 0.13, decay: 0.40 }, // double octave
-    ModeSpec { ratio: 5.4300, gain: 0.09, decay: 0.26 }, // inharmonic shimmer
-    ModeSpec { ratio: 6.8100, gain: 0.06, decay: 0.20 }, // inharmonic shimmer
-    ModeSpec { ratio: 8.9000, gain: 0.05, decay: 0.07 }, // metallic transient
-    ModeSpec { ratio: 11.700, gain: 0.03, decay: 0.05 }, // metallic transient
+    ModeSpec { ratio: 1.0000, gain: 0.58, decay: 0.90 }, // fundamental
+    ModeSpec { ratio: 1.0041, gain: 0.50, decay: 0.90 }, // ...split ~+7 cents
+    ModeSpec { ratio: 2.0000, gain: 0.41, decay: 1.50 }, // octave (rings long)
+    ModeSpec { ratio: 2.0060, gain: 0.34, decay: 1.50 }, // ...split (measured)
+    ModeSpec { ratio: 3.0000, gain: 0.26, decay: 1.70 }, // fifth (rings longest)
+    ModeSpec { ratio: 3.0050, gain: 0.13, decay: 1.70 }, // ...split (measured)
+    ModeSpec { ratio: 4.0000, gain: 0.05, decay: 0.90 }, // double octave
+    ModeSpec { ratio: 5.2500, gain: 0.05, decay: 0.55 }, // inharmonic shimmer
+    ModeSpec { ratio: 6.8100, gain: 0.05, decay: 0.20 }, // metallic transient
+    ModeSpec { ratio: 8.9000, gain: 0.03, decay: 0.07 }, // metallic transient
 ];
 
 /// Cut steel-tongue-drum field. A cut tongue vibrates like a clamped beam:

@@ -77,8 +77,9 @@ impl Handpan {
         let mut notes = Vec::with_capacity(n);
         let mut pan = Vec::with_capacity(n);
         for (i, &f) in freqs.iter().enumerate() {
-            // Longer, premium-length sustain; lower notes ring longest.
-            let t60_base = (8.5 * (150.0 / f)).clamp(1.6, 11.0);
+            // Fundamental decay; the octave/fifth extend well past this via
+            // their timbre multipliers. Lower notes ring longest.
+            let t60_base = (5.5 * (150.0 / f)).clamp(1.3, 7.0);
 
             let mut r = rng::Rng::new(profile.seed ^ (0x9E37_79B9u32.wrapping_mul(i as u32 + 1)));
             let cents = r.next_bipolar() * profile.detune_cents;

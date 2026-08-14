@@ -1,0 +1,14 @@
+[package]
+name = "handpan-analyzer"
+version = "0.1.0"
+edition = "2021"
+authors = ["Avery Wagar"]
+description = "Offline tool: extract modal parameters (partial freq/gain/decay) from note recordings into a handpan-core VoiceProfile timbre"
+license-file = "../../LICENSE"
+publish = false
+
+# Offline analysis tooling — third-party deps are fine here; the shippable
+# voice crate (handpan-core) stays dependency-free.
+[dependencies]
+puremp3 = "0.1"
+rustfft = "6"

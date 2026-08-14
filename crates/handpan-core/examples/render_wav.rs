@@ -23,21 +23,24 @@ fn render(path: &str, scale: &Scale, build: Build, size: Size) -> std::io::Resul
     let n_fields = scale.freqs().len();
     let mut hp = Handpan::from_preset(FS, scale, build, size);
 
-    // A little performance: ding, an ascending run, a descending phrase, and a
-    // soft rolling chord to show the sympathetic halo.
-    let mut events: Vec<(f32, usize, f32)> = vec![(0.0, 0, 0.95)];
+    // A slow, spacious performance so the sustain can sing: the ding, an
+    // unhurried ascending run, a gentle descending phrase, and a soft rolling
+    // chord to show the sympathetic halo.
+    let mut events: Vec<(f32, usize, f32)> = vec![(0.0, 0, 0.9)];
     for (k, field) in (1..n_fields).enumerate() {
-        events.push((1.2 + k as f32 * 0.45, field, 0.72));
+        events.push((2.2 + k as f32 * 0.9, field, 0.66));
     }
     let phrase = [n_fields - 1, 5, 4, 2, 1, 3, 1, 0];
+    let phrase_start = 2.2 + n_fields as f32 * 0.9 + 1.2;
     for (k, &f) in phrase.iter().enumerate() {
-        events.push((5.6 + k as f32 * 0.38, f.min(n_fields - 1), 0.6 + 0.15 * ((k % 2) as f32)));
+        events.push((phrase_start + k as f32 * 0.8, f.min(n_fields - 1), 0.55 + 0.15 * ((k % 2) as f32)));
     }
+    let chord_start = phrase_start + phrase.len() as f32 * 0.8 + 1.2;
     for (k, f) in [0usize, 4, 7, 2].into_iter().enumerate() {
-        events.push((9.2 + k as f32 * 0.06, f.min(n_fields - 1), 0.85));
+        events.push((chord_start + k as f32 * 0.09, f.min(n_fields - 1), 0.8));
     }
 
-    let total_s = events.iter().map(|e| e.0).fold(0.0, f32::max) + 6.0;
+    let total_s = events.iter().map(|e| e.0).fold(0.0, f32::max) + 8.0;
     let total_n = (total_s * FS) as usize;
     events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
