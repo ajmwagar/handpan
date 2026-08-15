@@ -13,7 +13,7 @@
 use alloc::vec::Vec;
 
 use crate::sequencer::{Sequencer, Step};
-use crate::{Build, Handpan, PlayMode, Scale, Size};
+use crate::{Artic, Build, Handpan, PlayMode, Scale, Size};
 
 /// A playable handpan/tongue-drum instrument for a modular context.
 pub struct HandpanInstrument {
@@ -84,6 +84,34 @@ impl HandpanInstrument {
         if let Some(idx) = nearest_field(&self.freqs, volts) {
             self.hp.strike(idx, velocity);
         }
+    }
+
+    /// Quantized strike with a playing articulation and position — the module's
+    /// main play input (V/Oct + Strike + Artic/Position CV).
+    pub fn strike_voct_artic(&mut self, volts: f32, velocity: f32, artic: Artic, position: f32) {
+        if let Some(idx) = nearest_field(&self.freqs, volts) {
+            self.hp.strike_artic(idx, velocity, artic, position);
+        }
+    }
+
+    /// Strike the gu (bottom-port bass hit).
+    pub fn strike_gu(&mut self, velocity: f32) {
+        self.hp.strike_gu(velocity);
+    }
+
+    /// Continuous palm-mute pressure (0 = open, 1 = muted).
+    pub fn set_damp(&mut self, amount: f32) {
+        self.hp.set_damp(amount);
+    }
+
+    /// Shared-shell interaction (cross-note intermodulation).
+    pub fn set_shell(&mut self, amount: f32) {
+        self.hp.set_shell_nonlin(amount);
+    }
+
+    /// 1V/oct value that selects `field` (for a Pitch-CV thru output).
+    pub fn field_voct(&self, field: usize) -> f32 {
+        voct_of_field(&self.freqs, field)
     }
 
     /// Advance the internal sequencer one clock and strike (unless resting or

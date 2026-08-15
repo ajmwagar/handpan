@@ -1,0 +1,8 @@
+RACK_DIR ?= ./.vcv-sdk/Rack-SDK
+SOURCES += src/plugin.cpp
+SOURCES += src/Handpan.cpp
+FLAGS += -I./libvcv_handpan
+LDFLAGS += ./libvcv_handpan/libvcv_handpan.a
+LDFLAGS += -lpthread -ldl
+DISTRIBUTABLES += res plugin.json
+include $(RACK_DIR)/plugin.mk
