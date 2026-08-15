@@ -61,6 +61,10 @@ pub struct VoiceProfile {
     /// octave/fifth energy on hard strikes (the "distortion process" measured
     /// in handpans/steelpans). 0 = purely linear.
     pub nonlin: f32,
+    /// Shared-shell nonlinearity: all ringing fields drive one nonlinear steel
+    /// surface, so simultaneous notes intermodulate (combination tones). This
+    /// is what makes two notes played together *interact* rather than just sum.
+    pub shell_nonlin: f32,
     /// Sympathetic coupling — the halo (0 = dry).
     pub coupling: f32,
     /// Per-note fabrication detune spread (cents).
@@ -89,6 +93,7 @@ impl VoiceProfile {
                 body_decay: 0.5,
                 body: 0.12,
                 nonlin: 0.18,
+                shell_nonlin: 0.05,
                 coupling: 0.07,
                 detune_cents: 3.0,
                 air: 0.16,
@@ -106,6 +111,7 @@ impl VoiceProfile {
                 body_decay: 0.3,
                 body: 0.06,
                 nonlin: 0.05,
+                shell_nonlin: 0.02,
                 coupling: 0.015,
                 detune_cents: 1.5,
                 air: 0.10,

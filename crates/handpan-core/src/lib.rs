@@ -60,6 +60,10 @@ pub struct Handpan {
     body: Resonator,
     body_amount: f32,
     body_exc: f32,
+    // Shared-shell nonlinearity → cross-note intermodulation.
+    shell_nonlin: f32,
+    shell_x1: f32,
+    shell_y1: f32,
     air: Air,
     air_wet: f32,
 }
@@ -114,6 +118,9 @@ impl Handpan {
             body,
             body_amount: profile.body,
             body_exc: 0.0,
+            shell_nonlin: profile.shell_nonlin,
+            shell_x1: 0.0,
+            shell_y1: 0.0,
             air: Air::new(fs),
             air_wet: profile.air,
         }
@@ -137,6 +144,12 @@ impl Handpan {
     /// Set the room-ambience ("Air") wet level (0 = dry).
     pub fn set_air(&mut self, wet: f32) {
         self.air_wet = wet.clamp(0.0, 1.0);
+    }
+
+    /// Set the shared-shell nonlinearity (cross-note intermodulation). 0 =
+    /// notes sum independently; higher = they interact through one surface.
+    pub fn set_shell_nonlin(&mut self, amount: f32) {
+        self.shell_nonlin = amount.clamp(0.0, 0.4);
     }
 
     /// Rest a hand on tone field `index` — a fast, natural mute.
@@ -178,11 +191,28 @@ impl Handpan {
     pub fn process(&mut self) -> (f32, f32) {
         let mut l = 0.0;
         let mut r = 0.0;
+        let mut mono = 0.0;
         for (note, &(pl, pr)) in self.notes.iter_mut().zip(self.pan.iter()) {
             let s = note.process();
             l += s * pl;
             r += s * pr;
+            mono += s;
         }
+
+        // Shared-shell nonlinearity: the whole membrane is one nonlinear
+        // surface, so every ringing field intermodulates through it. Squaring
+        // the summed displacement yields sum/difference (combination) tones
+        // between simultaneous notes. Feed-forward + DC-blocked → bounded.
+        if self.shell_nonlin > 1e-6 {
+            let m = mono.clamp(-4.0, 4.0);
+            let raw = self.shell_nonlin * m * m;
+            let hp = raw - self.shell_x1 + 0.999 * self.shell_y1;
+            self.shell_x1 = raw;
+            self.shell_y1 = hp;
+            l += hp * 0.5;
+            r += hp * 0.5;
+        }
+
         let b = self.body.process(self.body_exc) * self.body_amount;
         self.body_exc = 0.0;
         let (mut dl, mut dr) = (l + b, r + b);
@@ -290,6 +320,23 @@ mod tests {
             after = after.max(l.abs());
         }
         assert!(after < before * 0.1, "mute did not silence ({before} -> {after})");
+    }
+
+    #[test]
+    fn dyad_intermodulation_is_stable() {
+        // Two related notes struck hard together, shell nonlinearity engaged.
+        let mut hp = Handpan::from_preset(48_000.0, &Scale::DKurd9, Build::Handpan, Size::Large);
+        hp.set_shell_nonlin(0.2);
+        hp.strike(0, 1.0); // ding
+        hp.strike(4, 1.0); // a fifth-related field, same instant
+        let mut peak = 0.0f32;
+        for _ in 0..48_000 * 6 {
+            let (l, r) = hp.process();
+            assert!(l.is_finite() && r.is_finite(), "non-finite output");
+            peak = peak.max(l.abs().max(r.abs()));
+        }
+        assert!(peak > 0.01, "no sound");
+        assert!(peak < 50.0, "shell nonlinearity ran away: {peak}");
     }
 
     #[test]
