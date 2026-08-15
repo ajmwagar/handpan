@@ -2,10 +2,25 @@
 
 Every expressive feature is built once in `handpan-core`, then surfaced two
 ways: as MIDI/MPE/automation in the VSTi, and as CV/gate/knobs in the Eurorack
-modules. The **brain** module generates *intent* (note, velocity, articulation,
-gu, timing); the **voice** module is the instrument that consumes it. This keeps
-the Unix split: either module is useful alone, and together they play
-expressively from one clock.
+hardware.
+
+## Architecture (refined): one playable module
+
+The voice is a *detailed, playable handpan*, so the product is **one
+self-contained module**, not a voice+brain pair:
+
+- **Quantizer built in.** The V/Oct input snaps to the current scale's tone
+  fields (`strike_voct`), so it plays from anything — keyboard, LFO, joystick,
+  a sloppy CV source — and lands on handpan notes. No external quantizer needed.
+- **Expression comes from gesture, and the ecosystem already excels at it.** A
+  joystick maps naturally: X = field (pitch), Y = strike position/timbre,
+  Z/pressure = palm-mute damp, button = strike. 0-CTRL, Tetrapad, Pressure
+  Points, any sequencer all drive it. We don't ship our own controller.
+- **It still plays itself.** The internal generative (Wander / Euclid) is
+  *normalled* to the Strike input: nothing patched → it plays itself; patch a
+  controller → that takes over.
+- A dedicated generative **brain** stays possible as an *optional later
+  companion*, but is not required for v1.
 
 ## Feature → surfaces
 
@@ -28,30 +43,38 @@ Notes:
 - **Presets in hardware** are the panel state. Optional snapshot slots (recall
   by button/CV) only make sense if the panel gains an encoder + small display.
 
-## Panel tiers (voice module)
+## Panel tiers (the one module)
 
-**Compact (~8 HP)** — one expression axis, cheap, playable.
-- In: V/Oct, Strike, Velocity, **Feel** (one macro CV morphing artic+position+damp)
+`V/Oct` is scale-quantized (the built-in quantizer); `Strike` has the internal
+generative normalled to it (unplugged = plays itself).
+
+**Compact (~8–10 HP)** — one expression axis, cheap, playable.
+- In: V/Oct (quantized), Strike (norm→generative), Velocity, **Feel** (one macro
+  CV morphing artic+position+damp)
 - Out: L, R
 - Knobs: Scale, Size/Build, Air, Feel
 
-**Expressive (~12 HP)** — full articulation control, more "played".
-- In: V/Oct, Strike, Velocity, **Damp**, **Artic**, **Position**, **Gu** (gate)
+**Expressive (~12–14 HP)** — full articulation control, more "played".
+- In: V/Oct (quantized), Strike (norm→generative), Velocity, **Damp**,
+  **Artic**, **Position**, **Gu** (gate)
 - Out: L, R
 - Knobs: Scale, Size/Build, Air, Tune
 
-## Brain module (~6 HP)
+Optional out: a **Pitch CV** thru (the quantized field's V/oct) so the module
+can double as a handpan quantizer for the rest of the rack.
 
-- In: Clock, knobs (Scale, Mode, Density, Feel)
-- Out: Gate, 1V/oct CV, **Aux CV** (generated articulation / accent)
+## Optional brain companion (later, not v1)
+
+If a dedicated generative module is ever wanted: Clock + knobs (Scale, Mode,
+Density, Feel) → Gate, 1V/oct CV, **Aux CV** (generated articulation / accent).
+The internal normalled generative covers the "plays itself" case without it.
 
 ## Build order
 
-1. `handpan-core` DSP first (shared, lights up both products):
-   articulations (open/mute/slap), gu strike, strike-position timbre,
-   continuous `set_damp`, `set_tune`.
-2. VSTi: map MIDI/MPE/CC → the new APIs; preset system + GUI.
-3. Firmware: map CV/gate/knobs → the new APIs; pick a panel tier.
+1. `handpan-core` DSP — **done**: articulations (open/mute/slap), gu strike,
+   strike-position timbre, continuous `set_damp`, `tune_cents`.
+2. VSTi: map MIDI/MPE/CC → the APIs; preset system + GUI.
+3. Firmware: one module — quantized V/Oct + Strike (norm→generative) + Velocity
+   + expression CVs → the APIs; stereo out. Pick a panel tier.
 
-The core work is the same regardless of which product ships first, so it is the
-right next step.
+The core is shared, so either front-end can ship first.
