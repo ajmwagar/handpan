@@ -209,8 +209,13 @@ impl Handpan {
             let hp = raw - self.shell_x1 + 0.999 * self.shell_y1;
             self.shell_x1 = raw;
             self.shell_y1 = hp;
-            l += hp * 0.5;
-            r += hp * 0.5;
+            // Soft-saturate so a hard multi-note impact can't spike the
+            // combination tones into a crunchy burst. Small signals pass ~=hp
+            // (tanh(x)≈x); large ones fold gently into ±CAP.
+            const CAP: f32 = 0.35;
+            let sat = CAP * mathf::tanh(hp / CAP);
+            l += sat * 0.5;
+            r += sat * 0.5;
         }
 
         let b = self.body.process(self.body_exc) * self.body_amount;

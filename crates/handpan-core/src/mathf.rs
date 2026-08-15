@@ -32,6 +32,12 @@ pub fn log2(x: f32) -> f32 {
     x.log2()
 }
 
+#[cfg(feature = "std")]
+#[inline]
+pub fn tanh(x: f32) -> f32 {
+    x.tanh()
+}
+
 #[cfg(all(not(feature = "std"), feature = "libm"))]
 #[inline]
 pub fn sin(x: f32) -> f32 {
@@ -60,4 +66,10 @@ pub fn powf(a: f32, b: f32) -> f32 {
 #[inline]
 pub fn log2(x: f32) -> f32 {
     libm::log2f(x)
+}
+
+#[cfg(all(not(feature = "std"), feature = "libm"))]
+#[inline]
+pub fn tanh(x: f32) -> f32 {
+    libm::tanhf(x)
 }

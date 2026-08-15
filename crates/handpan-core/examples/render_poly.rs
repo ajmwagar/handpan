@@ -14,7 +14,7 @@ const FS: f32 = 48_000.0;
 fn main() -> std::io::Result<()> {
     let mut hp = Handpan::from_preset(FS, &Scale::DHijaz9, Build::Handpan, handpan_core::Size::Large);
     hp.set_air(0.20);
-    hp.set_shell_nonlin(0.12); // a touch more interaction so the layers lock
+    hp.set_shell_nonlin(0.07); // subtle interaction; hard hits stay smooth
     let n = hp.note_count();
     let low = n / 2; // split point between the two registers
 
@@ -30,13 +30,22 @@ fn main() -> std::io::Result<()> {
     b.set_feel(0.15, 0.05);
     let clk_b = 0.34;
 
-    // Accented chord impacts: (time_s, fields struck together).
-    let impacts: [(f32, &[usize]); 4] = [
+    // Accented chord impacts, expanded into a soft hand-roll: each note of the
+    // chord is staggered ~16 ms and slightly softer, so the transients don't
+    // stack into a crunchy spike.
+    let impact_chords: [(f32, &[usize]); 4] = [
         (3.6, &[0, 4, 7]),
         (8.6, &[0, 3, 6]),
         (13.6, &[1, 5, 8]),
         (18.6, &[0, 4, 7, 2]),
     ];
+    let mut impacts: Vec<(f32, usize, f32)> = Vec::new();
+    for (t0, fields) in impact_chords {
+        for (k, &f) in fields.iter().enumerate() {
+            impacts.push((t0 + k as f32 * 0.016, f, 0.82 - 0.05 * k as f32));
+        }
+    }
+    impacts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
     let total_s = 28.0;
     let total_n = (total_s * FS) as usize;
@@ -64,15 +73,10 @@ fn main() -> std::io::Result<()> {
             next_b += clk_b;
         }
 
-        // Impacts: strike the chord near-simultaneously (5 ms spread = a hand roll).
+        // Impacts: staggered chord notes (a hand roll), sample-accurate.
         while imp_i < impacts.len() && t >= impacts[imp_i].0 {
-            for (k, &f) in impacts[imp_i].1.iter().enumerate() {
-                // schedule each note a few samples apart by striking on the
-                // sample it lands on; here they're within one control step so
-                // just stagger the strike calls slightly via velocity shaping.
-                let v = 0.98 - 0.04 * k as f32;
-                hp.strike(f.min(n - 1), v);
-            }
+            let (_, f, v) = impacts[imp_i];
+            hp.strike(f.min(n - 1), v);
             imp_i += 1;
         }
 
