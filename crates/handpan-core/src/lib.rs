@@ -33,13 +33,15 @@ mod note;
 mod preset;
 mod resonator;
 mod rng;
+mod sequencer;
 
 pub mod scale;
 
-pub use modular::{HandpanInstrument, PlayMode};
+pub use modular::{voct_of_field, HandpanInstrument};
 pub use note::{ModeSpec, HANDPAN_TIMBRE, TONGUE_DRUM_TIMBRE};
 pub use preset::{Build, Size, VoiceProfile};
 pub use scale::Scale;
+pub use sequencer::{PlayMode, Sequencer, Step};
 
 use air::Air;
 use note::NoteVoice;
