@@ -65,7 +65,7 @@ pub struct VoiceProfile {
     /// surface, so simultaneous notes intermodulate (combination tones). This
     /// is what makes two notes played together *interact* rather than just sum.
     pub shell_nonlin: f32,
-    /// Sympathetic coupling — the halo (0 = dry).
+    /// Strike-time sympathetic coupling — the halo bloom when a note is hit.
     pub coupling: f32,
     /// Per-note fabrication detune spread (cents).
     pub detune_cents: f32,
