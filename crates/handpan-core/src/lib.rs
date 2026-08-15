@@ -64,6 +64,10 @@ pub struct Handpan {
     shell_nonlin: f32,
     shell_x1: f32,
     shell_y1: f32,
+    shell_lp: f32,   // band-limit the drive so only low modes intermodulate
+    shell_lp_a: f32,
+    shell_out: f32,  // smooth the generated combination tones
+    shell_out_a: f32,
     air: Air,
     air_wet: f32,
 }
@@ -121,6 +125,12 @@ impl Handpan {
             shell_nonlin: profile.shell_nonlin,
             shell_x1: 0.0,
             shell_y1: 0.0,
+            shell_lp: 0.0,
+            // ~900 Hz: only the strong low modes drive the nonlinearity.
+            shell_lp_a: 1.0 - mathf::exp(-core::f32::consts::TAU * 900.0 / fs),
+            shell_out: 0.0,
+            // ~2.5 kHz: tame the top of the generated combination tones.
+            shell_out_a: 1.0 - mathf::exp(-core::f32::consts::TAU * 2500.0 / fs),
             air: Air::new(fs),
             air_wet: profile.air,
         }
@@ -204,18 +214,23 @@ impl Handpan {
         // the summed displacement yields sum/difference (combination) tones
         // between simultaneous notes. Feed-forward + DC-blocked → bounded.
         if self.shell_nonlin > 1e-6 {
-            let m = mono.clamp(-4.0, 4.0);
+            // Band-limit the drive: the shell's nonlinear coupling is dominated
+            // by the large low-mode displacement, so squaring only the low end
+            // yields warm difference tones instead of broadband HF hash (which
+            // also kept it near Nyquist and aliasing).
+            self.shell_lp += self.shell_lp_a * (mono - self.shell_lp);
+            let m = self.shell_lp.clamp(-4.0, 4.0);
             let raw = self.shell_nonlin * m * m;
+            // DC-block, then soft-saturate so hard hits fold gently.
             let hp = raw - self.shell_x1 + 0.999 * self.shell_y1;
             self.shell_x1 = raw;
             self.shell_y1 = hp;
-            // Soft-saturate so a hard multi-note impact can't spike the
-            // combination tones into a crunchy burst. Small signals pass ~=hp
-            // (tanh(x)≈x); large ones fold gently into ±CAP.
             const CAP: f32 = 0.35;
             let sat = CAP * mathf::tanh(hp / CAP);
-            l += sat * 0.5;
-            r += sat * 0.5;
+            // Smooth the top of the generated tones.
+            self.shell_out += self.shell_out_a * (sat - self.shell_out);
+            l += self.shell_out * 0.5;
+            r += self.shell_out * 0.5;
         }
 
         let b = self.body.process(self.body_exc) * self.body_amount;
