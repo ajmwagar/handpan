@@ -72,6 +72,9 @@ pub struct VoiceProfile {
     /// Built-in room ambience ("Air") wet level — the space premium demos are
     /// recorded in (0 = dry).
     pub air: f32,
+    /// Global tuning offset in cents (e.g. -31.8 for A=432). Applied to every
+    /// fundamental at build.
+    pub tune_cents: f32,
     /// Seed for deterministic per-note noise and detune.
     pub seed: u32,
 }
@@ -97,6 +100,7 @@ impl VoiceProfile {
                 coupling: 0.07,
                 detune_cents: 3.0,
                 air: 0.16,
+                tune_cents: 0.0,
                 seed: 0x1234_5678,
             },
             Build::TongueDrum => VoiceProfile {
@@ -115,6 +119,7 @@ impl VoiceProfile {
                 coupling: 0.015,
                 detune_cents: 1.5,
                 air: 0.10,
+                tune_cents: 0.0,
                 seed: 0x1234_5678,
             },
         };

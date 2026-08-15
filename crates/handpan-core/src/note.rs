@@ -19,6 +19,17 @@ pub struct ModeSpec {
     pub decay: f32,
 }
 
+/// Playing articulation for a strike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Artic {
+    /// Full open tone — the note rings.
+    Open,
+    /// Muted: struck with the hand staying on the field. Short, thuddy.
+    Mute,
+    /// Slap: bright percussive edge hit. Very short, mostly attack.
+    Slap,
+}
+
 /// Dimpled/domed handpan tone field. Measured-informed: partial ratios, gains,
 /// and decays come from analysis of real handpan recordings (see
 /// `docs/measured_modes.md`). The defining correction over a naive model is
@@ -88,6 +99,13 @@ pub struct NoteVoice {
     // Hand-mute: when damping, bleed resonator energy each sample.
     damping: bool,
     damp_coef: f32,
+    // Per-strike articulation damping (mute/slap) and continuous pressure
+    // damping (palm mute); both are per-sample bleed factors, 1.0 = none.
+    artic_damp: f32,
+    pressure_damp: f32,
+    // Strike position (0 = center, 1 = edge) and attack-click emphasis.
+    position: f32,
+    click_boost: f32,
     // Geometric-nonlinearity harmonic generation: the fundamental pumps the
     // octave (quadratic) and fifth (cubic), so hard strikes bloom brighter —
     // the "distortion process" measured in handpans/steelpans.
@@ -146,6 +164,10 @@ impl NoteVoice {
             damping: false,
             // ~90 ms mute at 48 kHz; recomputed for fs below.
             damp_coef: mathf::exp(-1.0 / (0.09 * fs)),
+            artic_damp: 1.0,
+            pressure_damp: 1.0,
+            position: 0.4,
+            click_boost: 1.0,
             nonlin: profile.nonlin,
             dc_x1: 0.0,
             dc_y1: 0.0,
@@ -154,23 +176,44 @@ impl NoteVoice {
     }
 
     /// Trigger a strike. `velocity` in [0, 1] sets loudness, brightness, and
-    /// bloom depth. Each strike varies slightly so repeats never sound
+    /// bloom depth; `artic` the playing technique; `position` (0 = center,
+    /// 1 = edge) the timbre. Each strike varies slightly so repeats never sound
     /// machine-gunned.
-    pub fn strike(&mut self, velocity: f32) {
+    pub fn strike(&mut self, velocity: f32, artic: Artic, position: f32) {
         let v = velocity.clamp(0.0, 1.0);
-        self.damping = false; // a strike lifts the hand
-        // Per-strike micro-variation in level and bloom depth.
+        self.damping = false; // a strike lifts the (note-off) hand
+        self.position = position.clamp(0.0, 1.0);
+
+        // Articulation shapes level, brightness, attack click, and how fast the
+        // note is choked.
+        let (amp_scale, vel_scale, click, choke_s) = match artic {
+            Artic::Open => (1.0, 1.0, 1.0, None),
+            Artic::Mute => (0.85, 0.55, 0.8, Some(0.30)),
+            Artic::Slap => (0.90, 1.5, 1.7, Some(0.10)),
+        };
+        self.artic_damp = match choke_s {
+            Some(t) => mathf::exp(-1.0 / (t * self.fs)),
+            None => 1.0,
+        };
+        self.click_boost = click;
+
         let jitter_amp = 1.0 + 0.06 * self.rng.next_bipolar();
         let jitter_bloom = 1.0 + 0.15 * self.rng.next_bipolar();
-        self.exc_amp = self.exc_amp.max(v * jitter_amp);
-        self.exc_vel = self.exc_vel.max(v);
+        self.exc_amp = self.exc_amp.max(v * jitter_amp * amp_scale);
+        self.exc_vel = self.exc_vel.max(v * vel_scale);
         self.exc_remaining = self.exc_len.max(1);
         self.bloom_cur = self.bloom_cur.max(v * self.bloom_peak * jitter_bloom);
     }
 
-    /// Rest a hand on the field — a fast, natural mute.
+    /// Rest a hand on the field — a fast, full note-off mute.
     pub fn damp(&mut self) {
         self.damping = true;
+    }
+
+    /// Continuous palm-mute pressure: `factor` is a per-sample bleed (1.0 =
+    /// open, <1 damps). Set from a pressure CV or aftertouch.
+    pub fn set_pressure(&mut self, factor: f32) {
+        self.pressure_damp = factor.clamp(0.90, 1.0);
     }
 
     #[inline]
@@ -181,7 +224,7 @@ impl NoteVoice {
             let env = mathf::exp(-6.0 * t);
             self.exc_remaining -= 1;
             let noise = self.rng.next_bipolar();
-            let click = if n == 0 { 1.0 } else { 0.0 };
+            let click = if n == 0 { self.click_boost } else { 0.0 };
             self.exc_amp * (env * 0.7 * noise + click)
         } else {
             0.0
@@ -189,13 +232,22 @@ impl NoteVoice {
         self.lp += self.lp_a * (raw - self.lp);
         let exc = self.lp;
 
+        // Combined per-sample energy bleed: note-off mute × articulation choke
+        // × continuous pressure.
+        let damp = self.pressure_damp
+            * self.artic_damp
+            * if self.damping { self.damp_coef } else { 1.0 };
+        let do_damp = damp < 0.999_99;
+
         let mut sum = 0.0;
         let mut fund = 0.0;
         for m in &mut self.modes {
-            if self.damping {
-                m.res.damp_state(self.damp_coef);
+            if do_damp {
+                m.res.damp_state(damp);
             }
-            let w = 1.0 + self.exc_vel * (m.ratio - 1.0) * 0.12;
+            // Brightness rises with velocity and with strike position toward
+            // the edge.
+            let w = 1.0 + (self.exc_vel * 0.12 + self.position * 0.22) * (m.ratio - 1.0);
             let y = m.res.process(exc * w);
             sum += y;
             if m.is_fund {

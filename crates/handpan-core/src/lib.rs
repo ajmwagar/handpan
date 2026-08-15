@@ -38,7 +38,7 @@ mod sequencer;
 pub mod scale;
 
 pub use modular::{voct_of_field, HandpanInstrument};
-pub use note::{ModeSpec, HANDPAN_TIMBRE, TONGUE_DRUM_TIMBRE};
+pub use note::{Artic, ModeSpec, HANDPAN_TIMBRE, TONGUE_DRUM_TIMBRE};
 pub use preset::{Build, Size, VoiceProfile};
 pub use scale::Scale;
 pub use sequencer::{PlayMode, Sequencer, Step};
@@ -88,7 +88,10 @@ impl Handpan {
         let n = freqs.len();
         let mut notes = Vec::with_capacity(n);
         let mut pan = Vec::with_capacity(n);
-        for (i, &f) in freqs.iter().enumerate() {
+        // Global reference tuning (e.g. A=432 → -31.8 cents).
+        let tune = mathf::powf(2.0, profile.tune_cents / 1200.0);
+        for (i, &f_raw) in freqs.iter().enumerate() {
+            let f = f_raw * tune;
             // Fundamental decay; the octave/fifth extend well past this via
             // their timbre multipliers. Lower notes ring longest.
             let t60_base = (5.5 * (150.0 / f)).clamp(1.3, 7.0);
@@ -176,24 +179,52 @@ impl Handpan {
         }
     }
 
-    /// Strike tone field `index` with `velocity` in [0, 1]. Neighbouring fields
-    /// receive a sympathetic excitation weighted by harmonic relatedness (the
-    /// halo), and the shared shell resonance is driven by the hit.
+    /// Strike tone field `index` with `velocity`, open tone from a natural
+    /// position. Convenience over [`Handpan::strike_artic`].
     pub fn strike(&mut self, index: usize, velocity: f32) {
+        self.strike_artic(index, velocity, Artic::Open, 0.4);
+    }
+
+    /// Strike tone field `index` with a playing articulation and position
+    /// (0 = center, 1 = edge). Neighbouring fields receive a sympathetic
+    /// excitation weighted by harmonic relatedness (the halo), and the shared
+    /// shell resonance is driven by the hit.
+    pub fn strike_artic(&mut self, index: usize, velocity: f32, artic: Artic, position: f32) {
         if index >= self.notes.len() {
             return;
         }
         for j in 0..self.notes.len() {
             if j == index {
-                self.notes[j].strike(velocity);
+                self.notes[j].strike(velocity, artic, position);
             } else {
                 let bleed = velocity * self.coupling * self.couple_w[index][j];
                 if bleed > 1e-4 {
-                    self.notes[j].strike(bleed);
+                    self.notes[j].strike(bleed, Artic::Open, 0.4);
                 }
             }
         }
-        self.body_exc += velocity;
+        // Muted/slap hits couple less into the shell than open tones.
+        let shell_drive = match artic {
+            Artic::Open => 1.0,
+            Artic::Mute => 0.4,
+            Artic::Slap => 0.6,
+        };
+        self.body_exc += velocity * shell_drive;
+    }
+
+    /// Strike the gu — the bottom-port bass hit. Drives the shell/cavity
+    /// resonance hard for a low thump, no tone field.
+    pub fn strike_gu(&mut self, velocity: f32) {
+        self.body_exc += velocity.clamp(0.0, 1.0) * 5.0;
+    }
+
+    /// Continuous palm-mute pressure across the whole instrument (0 = open,
+    /// 1 = fully muted). Drive from a pressure CV or MPE aftertouch.
+    pub fn set_damp(&mut self, amount: f32) {
+        let factor = 1.0 - amount.clamp(0.0, 1.0) * 0.005;
+        for n in &mut self.notes {
+            n.set_pressure(factor);
+        }
     }
 
     /// Advance one sample, returning interleaved `(left, right)`.
