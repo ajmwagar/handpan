@@ -12,12 +12,14 @@ default = ["std"]
 # Host builds (VSTi, tests, WAV rendering): use libstd math.
 std = []
 # Embedded / firmware builds: no_std + alloc, transcendentals via libm.
-# Enable with `--no-default-features --features libm` and add the libm dep.
-libm = []
+# Enable with `--no-default-features --features libm`.
+libm = ["dep:libm"]
 
 [dependencies]
-# Intentionally none. The voice core is self-contained IP with zero
-# third-party code so it can be licensed and shipped without encumbrance.
+# The only optional dependency, pulled in solely for no_std firmware builds to
+# supply sin/cos/exp/pow. Host/plugin builds (default = std) stay dependency-free
+# so the shippable voice IP carries no third-party code.
+libm = { version = "0.2", optional = true }
 
 [[example]]
 name = "render_wav"
