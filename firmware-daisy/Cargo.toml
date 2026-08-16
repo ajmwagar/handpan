@@ -1,0 +1,26 @@
+[package]
+name = "handpan-patch-sm"
+version = "0.1.0"
+edition = "2021"
+authors = ["Avery Wagar"]
+description = "Puget Handpan firmware for Daisy Patch.SM / Patch.Init()"
+license-file = "../LICENSE"
+publish = false
+
+[[bin]]
+name = "handpan-patch-init"
+path = "src/main.rs"
+
+[dependencies]
+daisy = { version = "0.11", default-features = false, features = ["patch_sm"] }
+stm32h7xx-hal = { version = "0.16", features = ["stm32h750v", "rt", "revision_v", "xspi", "fmc"] }
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = { version = "0.7", features = ["device"] }
+embedded-alloc = "0.6"
+panic-halt = "1.0"
+handpan-core = { path = "../crates/handpan-core", default-features = false, features = ["libm"] }
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+debug = true
