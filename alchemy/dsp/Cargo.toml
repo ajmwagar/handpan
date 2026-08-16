@@ -1,0 +1,26 @@
+[package]
+name = "handpan-dsp"
+version = "0.1.0"
+edition = "2021"
+description = "Rust <-> C++ bridge: handpan-core as an Alchemy Lab DSP static library"
+license-file = "../../LICENSE"
+publish = false
+
+# Own single-crate workspace so it doesn't join the host workspace.
+[workspace]
+
+[lib]
+name = "handpan_dsp"
+crate-type = ["staticlib"]
+
+[dependencies]
+handpan-core = { path = "../../crates/handpan-core", default-features = false, features = ["libm"] }
+embedded-alloc = "0.6"
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+panic-halt = "1.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
