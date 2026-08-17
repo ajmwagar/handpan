@@ -1,0 +1,20 @@
+[package]
+name = "bowed-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Avery Wagar"]
+description = "Bowed-string physical modeling (violin/viola/cello/bass) — digital-waveguide string + nonlinear stick-slip bow"
+license-file = "../../LICENSE"
+publish = false
+
+[features]
+default = ["std"]
+std = []
+libm = ["dep:libm"]
+
+[dependencies]
+libm = { version = "0.2", optional = true }
+
+[[example]]
+name = "render_strings"
+required-features = ["std"]
