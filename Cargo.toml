@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/handpan-core", "crates/handpan-plugin", "xtask", "crates/handpan-analyzer"]
+members = ["crates/handpan-core", "crates/handpan-plugin", "xtask", "crates/handpan-analyzer", "crates/mallet-core"]
 # Firmware targets thumbv7em-none-eabihf and builds standalone; keep it out of
 # the host workspace so `cargo build --workspace` doesn't try to cross-compile it.
 exclude = ["firmware", "vcv", "firmware-daisy", "alchemy"]
