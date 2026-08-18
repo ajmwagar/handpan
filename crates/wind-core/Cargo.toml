@@ -18,3 +18,7 @@ libm = { version = "0.2", optional = true }
 [[example]]
 name = "render_winds"
 required-features = ["std"]
+
+[[example]]
+name = "probe"
+required-features = ["std"]

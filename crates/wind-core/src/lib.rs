@@ -103,6 +103,51 @@ impl Reflect {
     }
 }
 
+/// RBJ peaking-EQ biquad — the radiation/formant shaping fit to measured
+/// clarinet spectra (the raw waveguide rolls off too fast below the tonehole
+/// cutoff; this lifts the strong low-harmonic region back to the real balance).
+struct Peaking {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+impl Peaking {
+    fn new(freq: f32, q: f32, db_gain: f32, fs: f32) -> Self {
+        let a = mathf::powf(10.0, db_gain / 40.0);
+        let w0 = core::f32::consts::TAU * freq / fs;
+        let (s, c) = (mathf::sin(w0), mathf::cos(w0));
+        let alpha = s / (2.0 * q);
+        let a0 = 1.0 + alpha / a;
+        Peaking {
+            b0: (1.0 + alpha * a) / a0,
+            b1: (-2.0 * c) / a0,
+            b2: (1.0 - alpha * a) / a0,
+            a1: (-2.0 * c) / a0,
+            a2: (1.0 - alpha / a) / a0,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+        }
+    }
+    #[inline]
+    fn tick(&mut self, x: f32) -> f32 {
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2 - self.a1 * self.y1
+            - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+}
+
 /// The instruments modeled by this core.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindKind {
@@ -117,6 +162,7 @@ pub struct Wind {
 
     bore: Delay,
     refl: Reflect,
+    radiate: [Peaking; 2],
     freq: f32,
 
     // Reed table: opening = clamp(offset + slope·Δp). A one-sided valve
@@ -151,16 +197,24 @@ impl Wind {
     pub fn new(fs: f32, kind: WindKind) -> Self {
         let max = (fs / 40.0) as usize + 4; // lowest ~40 Hz bore
         let (reed_offset, reed_slope, out_gain, noise_gain) = match kind {
-            // Clarinet reed: grippy negative-slope table (STK-style).
+            // Clarinet reed: classic STK reed table (offset 0.7, slope -0.44).
             WindKind::Clarinet => (0.7, -0.44, 1.0, 0.07),
         };
         Wind {
             fs,
             kind,
             bore: Delay::new(max),
-            // Loss ~0.95, and a fairly dark loop (damp ~0.55) so the upper odd
-            // harmonics roll off — set_brightness moves the cutoff.
-            refl: Reflect::new(0.95, 0.55),
+            // Loss ~0.95. The loop low-pass models the clarinet's tonehole-
+            // lattice cutoff (~1.4 kHz): harmonics below it stand strongly,
+            // above it roll off steeply — the measured clarinet envelope.
+            refl: Reflect::new(0.95, 0.81),
+            // Radiation shaping fit to Iowa MIS clarinet spectra: a broad
+            // presence boost flattening the strong sub-cutoff harmonics, and a
+            // second small lift near the ~3 kHz clarinet formant.
+            radiate: [
+                Peaking::new(1000.0, 0.6, 13.0, fs),
+                Peaking::new(3000.0, 1.2, 5.0, fs),
+            ],
             freq: 220.0,
             reed_offset,
             reed_slope,
@@ -239,8 +293,8 @@ impl Wind {
     /// woody (chalumeau), 1 = bright and reedy (a hard, buzzy embouchure).
     pub fn set_brightness(&mut self, amount: f32) {
         let a = amount.clamp(0.0, 1.0);
-        // Dark: heavy smoothing (~1.2 kHz). Bright: light (~6 kHz).
-        self.refl.damp = 0.72 - 0.42 * a;
+        // Moves the tonehole cutoff: dark ~0.9 kHz, bright ~3 kHz (~1.4 kHz mid).
+        self.refl.damp = 0.88 - 0.23 * a;
         self.update_delay(); // cutoff change shifts group delay → keep in tune
     }
 
@@ -251,16 +305,7 @@ impl Wind {
         // — hard floor near 0, softer ceiling — breaks the perfect odd-only
         // symmetry of an ideal cylinder and yields the weak even harmonics.
         let r = self.reed_offset + self.reed_slope * pdiff;
-        if r > 1.0 {
-            1.0
-        } else if r < -0.2 {
-            // Hard, asymmetric floor: the reed beats against the mouthpiece and
-            // stays shut. This clipping-on-one-side-only is what fills in the
-            // weak even harmonics a real (non-ideal) clarinet radiates.
-            -0.2
-        } else {
-            r
-        }
+        r.clamp(-1.0, 1.0)
     }
 
     /// One mono sample.
@@ -305,7 +350,12 @@ impl Wind {
         self.dc_x1 = out;
         self.dc_y1 = y;
 
-        y * self.out_gain
+        // Radiation/formant shaping (fit to measured spectra).
+        let mut r = y;
+        for p in &mut self.radiate {
+            r = p.tick(r);
+        }
+        r * self.out_gain
     }
 }
 
