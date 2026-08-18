@@ -176,13 +176,16 @@ impl StringKind {
             StringKind::Bass => (0.66, 0.10),
         }
     }
-    /// Frequency scale applied to the violin body-mode template.
+    /// Frequency scale applied to the violin body-mode template. (The bass uses
+    /// its own table instead — see [`Body::new`].)
     fn body_scale(self) -> f32 {
         match self {
             StringKind::Violin => 1.0,
-            StringKind::Viola => 0.80,
+            // Measured (Iowa MIS): the viola body maps onto the violin template
+            // almost perfectly under a single ~0.82 scale.
+            StringKind::Viola => 0.82,
             StringKind::Cello => 0.52,
-            StringKind::Bass => 0.36,
+            StringKind::Bass => 0.20, // unused (bass has its own table)
         }
     }
 }
@@ -202,7 +205,10 @@ pub struct Body {
 }
 impl Body {
     fn new(kind: StringKind, fs: f32) -> Self {
-        // (freq, Q, gain) for the violin; scaled in frequency per instrument.
+        // Violin body template (freq, Q, gain); scaled in frequency for the
+        // viola and cello. Corroborated by a long-term-average spectrum of Iowa
+        // MIS recordings: the A0 air mode, the A1/B1± cluster (~460-530, the
+        // strongest peaks), wood modes, and the broad bridge hill.
         const TPL: &[(f32, f32, f32)] = &[
             (280.0, 14.0, 0.55), // A0 air
             (460.0, 22.0, 0.85), // B1-
@@ -215,13 +221,39 @@ impl Body {
             (2500.0, 4.0, 0.55), // broad bridge hill
             (3500.0, 5.0, 0.28),
         ];
-        let scale = kind.body_scale();
+        // The double bass is NOT a scaled violin: its body energy is a tight
+        // low cluster (~57-170 Hz) with a steep roll-off above ~200 Hz and no
+        // meaningful bridge hill. Measured directly from Iowa MIS recordings.
+        const TPL_BASS: &[(f32, f32, f32)] = &[
+            (57.0, 18.0, 0.80),  // A0 main air
+            (85.0, 20.0, 0.85),
+            (101.0, 22.0, 1.00), // main wood (strongest)
+            (127.0, 18.0, 0.85),
+            (147.0, 14.0, 0.60),
+            (170.0, 12.0, 0.50),
+            (196.0, 10.0, 0.38),
+            (270.0, 8.0, 0.20),
+            (330.0, 6.0, 0.15),
+            (500.0, 4.0, 0.12), // broad, weak; negligible above
+        ];
         let nyq = fs * 0.45;
         let mut modes = Vec::with_capacity(TPL.len());
-        for &(f, q, g) in TPL {
-            let freq = f * scale;
-            if freq < nyq {
-                modes.push(Reso::new(freq, q, g, fs));
+        match kind {
+            StringKind::Bass => {
+                for &(f, q, g) in TPL_BASS {
+                    if f < nyq {
+                        modes.push(Reso::new(f, q, g, fs));
+                    }
+                }
+            }
+            _ => {
+                let scale = kind.body_scale();
+                for &(f, q, g) in TPL {
+                    let freq = f * scale;
+                    if freq < nyq {
+                        modes.push(Reso::new(freq, q, g, fs));
+                    }
+                }
             }
         }
         Body { modes, dry: 0.55, wet: 0.11, makeup: 3.4 }
