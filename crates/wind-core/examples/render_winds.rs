@@ -43,6 +43,10 @@ fn main() -> std::io::Result<()> {
     phrase(&mut out, WindKind::Clarinet, 0.55, 0.16,
         &[(62, 0.5), (65, 0.5), (69, 0.5), (70, 0.6), (69, 0.5), (65, 0.5), (62, 0.9), (50, 1.4)], 0.9);
 
+    // Flute — a light, airy phrase in the upper register (stays above C4).
+    phrase(&mut out, WindKind::Flute, 0.5, 0.14,
+        &[(72, 0.4), (74, 0.4), (76, 0.4), (79, 0.6), (76, 0.4), (74, 0.4), (72, 0.5), (77, 1.1)], 0.9);
+
     // Alto sax — a bluesy, reedy phrase in the mid register.
     phrase(&mut out, WindKind::Saxophone, 0.6, 0.25,
         &[(63, 0.45), (65, 0.3), (66, 0.3), (68, 0.5), (66, 0.4), (63, 0.4), (61, 0.7), (58, 1.2)], 0.85);
