@@ -218,6 +218,13 @@ pub struct Wind {
     vib_rate: f32,
     vib_depth: f32,
 
+    // Always-on organic breath movement: two incommensurate slow LFOs + a slow
+    // random walk, so sustained notes breathe instead of sitting dead-static.
+    lfo_a: f32,
+    lfo_b: f32,
+    breath_walk: f32,
+    breath_move: f32,
+
     // Bell-radiation even-harmonic term (DC-tracked) + output DC blocker.
     even_dc: f32,
     dc_x1: f32,
@@ -238,8 +245,9 @@ impl Wind {
         let (reed_offset, reed_slope, out_gain, noise_gain) = match kind {
             // Clarinet reed: classic STK reed table (offset 0.7, slope -0.44).
             WindKind::Clarinet => (0.7, -0.44, 1.0, 0.07),
-            // Flute: no reed table (jet drive); airy noise.
-            WindKind::Flute => (0.0, 0.0, 1.0, 0.05),
+            // Flute: no reed table (jet drive); strong airy breath noise (a
+            // real flute is markedly breathier than the raw jet oscillation).
+            WindKind::Flute => (0.0, 0.0, 1.0, 0.14),
             // Saxophone reed: same table, a touch grippier; breathier. Higher
             // output gain compensates for the steep radiation low-pass.
             WindKind::Saxophone => (0.7, -0.50, 3.5, 0.10),
@@ -324,6 +332,10 @@ impl Wind {
             vib_phase: 0.0,
             vib_rate: 5.0,
             vib_depth: 0.0,
+            lfo_a: 0.0,
+            lfo_b: 1.7,
+            breath_walk: 0.0,
+            breath_move: 1.0,
             even_dc: 0.0,
             dc_x1: 0.0,
             dc_y1: 0.0,
@@ -468,11 +480,28 @@ impl Wind {
         };
         self.breath_env += rate * (self.breath_target - self.breath_env);
 
+        // Organic breath movement: two slow incommensurate LFOs (~0.7 & ~2.3 Hz)
+        // plus a slow random walk — the constant micro-fluctuation of a real
+        // player's air. Always on; keeps sustained notes alive.
+        self.lfo_a += core::f32::consts::TAU * 0.7 / self.fs;
+        self.lfo_b += core::f32::consts::TAU * 2.3 / self.fs;
+        if self.lfo_a > core::f32::consts::TAU {
+            self.lfo_a -= core::f32::consts::TAU;
+        }
+        if self.lfo_b > core::f32::consts::TAU {
+            self.lfo_b -= core::f32::consts::TAU;
+        }
+        self.breath_walk += 0.0002 * (self.white() - self.breath_walk);
+        let drift = 0.55 * mathf::sin(self.lfo_a) + 0.30 * mathf::sin(self.lfo_b)
+            + 3.0 * self.breath_walk;
+        // Target ~4% peak movement; smoothed so it's a gentle sway, not a warble.
+        self.breath_move += 0.02 * ((1.0 + 0.045 * drift) - self.breath_move);
+
         // Breath = envelope + turbulence noise + vibrato (as pressure ripple).
         // The noise is low-passed into an airy "breath" band rather than hiss.
         let n = self.white();
         self.noise_lp += 0.2 * (n - self.noise_lp);
-        let mut breath = self.breath_env;
+        let mut breath = self.breath_env * self.breath_move;
         breath += breath * self.noise_gain * self.noise_lp;
         if self.vib_depth > 0.0 {
             self.vib_phase += core::f32::consts::TAU * self.vib_rate / self.fs;
