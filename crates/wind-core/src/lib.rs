@@ -239,6 +239,12 @@ pub struct Wind {
     lfo_b: f32,
     breath_walk: f32,
     breath_move: f32,
+    // Breath-modulation routing. `breath_cv` is an external modulation source
+    // (a bipolar CV, ~[-1, 1]) NORMALLED to the onboard LFO: when `Some`, it
+    // drives the breath movement; when `None`, the internal LFO does. `depth`
+    // scales either source (a front-panel attenuator).
+    breath_cv: Option<f32>,
+    breath_mod_depth: f32,
 
     // Bell-radiation even-harmonic term (DC-tracked) + output DC blocker.
     even_dc: f32,
@@ -365,6 +371,8 @@ impl Wind {
             lfo_b: 1.7,
             breath_walk: 0.0,
             breath_move: 1.0,
+            breath_cv: None,
+            breath_mod_depth: 0.045,
             even_dc: 0.0,
             dc_x1: 0.0,
             dc_y1: 0.0,
@@ -469,6 +477,25 @@ impl Wind {
         };
     }
 
+    /// External breath-modulation CV, **normalled to the onboard LFO**.
+    ///
+    /// Pass `Some(cv)` — a bipolar signal, nominally `[-1, 1]` — to drive the
+    /// breath movement from an external source (a CV jack, host automation, an
+    /// MPE dimension). Feed the current value each sample/block while the input
+    /// is "patched". Pass `None` to un-patch: the internal LFO takes over again,
+    /// exactly like a normalled Eurorack jack. The LFO keeps running underneath
+    /// either way, so switching back is seamless.
+    pub fn set_breath_mod(&mut self, cv: Option<f32>) {
+        self.breath_cv = cv;
+    }
+
+    /// Depth of the breath modulation (attenuator on whichever source is active,
+    /// external or the LFO). 0 = none, ~0.045 = the subtle default sway, up to a
+    /// deep tremolo. Applies to both the CV input and the onboard LFO.
+    pub fn set_breath_mod_depth(&mut self, depth: f32) {
+        self.breath_mod_depth = depth.clamp(0.0, 0.6);
+    }
+
     /// Vibrato: rate (Hz) and depth (breath-pressure modulation, 0..~0.5).
     pub fn set_vibrato(&mut self, rate_hz: f32, depth: f32) {
         self.vib_rate = rate_hz.max(0.0);
@@ -526,10 +553,12 @@ impl Wind {
             self.lfo_b -= core::f32::consts::TAU;
         }
         self.breath_walk += 0.0002 * (self.white() - self.breath_walk);
-        let drift = 0.55 * mathf::sin(self.lfo_a) + 0.30 * mathf::sin(self.lfo_b)
+        let lfo = 0.55 * mathf::sin(self.lfo_a) + 0.30 * mathf::sin(self.lfo_b)
             + 3.0 * self.breath_walk;
-        // Target ~4% peak movement; smoothed so it's a gentle sway, not a warble.
-        self.breath_move += 0.02 * ((1.0 + 0.045 * drift) - self.breath_move);
+        // Normalled routing: the external breath-mod CV when patched, otherwise
+        // the onboard LFO. Smoothed so it's a gentle sway, not a warble.
+        let drift = self.breath_cv.unwrap_or(lfo);
+        self.breath_move += 0.02 * ((1.0 + self.breath_mod_depth * drift) - self.breath_move);
 
         // Breath = envelope + turbulence noise + vibrato (as pressure ripple).
         // The noise is low-passed into an airy "breath" band rather than hiss.
@@ -780,6 +809,36 @@ mod tests {
                 assert!(cents.abs() < 25.0, "{kind:?} {f0}Hz off by {cents:.1} cents ({f:.1})");
             }
         }
+    }
+
+    #[test]
+    fn breath_mod_cv_normals_to_lfo() {
+        let fs = 48_000.0;
+        // Patched: a constant external CV drives the breath movement to a
+        // steady offset (the onboard LFO is overridden).
+        let mut v = Wind::new(fs, WindKind::Clarinet);
+        v.note_on(261.63, 0.9);
+        v.set_breath_mod(Some(1.0));
+        v.set_breath_mod_depth(0.1);
+        for _ in 0..fs as usize {
+            v.process();
+        }
+        assert!(
+            (v.breath_move - 1.1).abs() < 0.01,
+            "patched CV should hold breath_move ≈ 1.1, got {}",
+            v.breath_move
+        );
+
+        // Un-patched: the internal LFO moves the breath (not pinned to 1.0).
+        v.set_breath_mod(None);
+        let mut lo = f32::MAX;
+        let mut hi = f32::MIN;
+        for _ in 0..fs as usize * 3 {
+            v.process();
+            lo = lo.min(v.breath_move);
+            hi = hi.max(v.breath_move);
+        }
+        assert!(hi - lo > 0.01, "normalled LFO should modulate breath, span {}", hi - lo);
     }
 
     #[test]
