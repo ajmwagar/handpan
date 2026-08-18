@@ -1,6 +1,5 @@
-//! Render a clarinet montage — a melodic phrase across the chalumeau and
-//! clarion registers, with breath swells and vibrato, plus a sustained low
-//! note to show the hollow odd-harmonic body.
+//! Render a wind montage: clarinet (woody, odd-harmonic), alto sax (reedy,
+//! all-harmonic), and trumpet (brassy lip reed). Breath swells + vibrato.
 //! `cargo run -p wind-core --example render_winds`.
 
 use std::fs::File;
@@ -14,48 +13,43 @@ fn midi(n: i32) -> f32 {
     440.0 * 2f32.powf((n as f32 - 69.0) / 12.0)
 }
 
-fn main() -> std::io::Result<()> {
-    let mut out = Vec::new();
-
-    let mut v = Wind::new(FS, WindKind::Clarinet);
-    v.set_vibrato(5.0, 0.18);
-    v.set_brightness(0.55);
-
-    // A little phrase, then a held low note.
-    let phrase: &[(i32, f32)] = &[
-        (50, 0.5),
-        (53, 0.5),
-        (57, 0.5),
-        (58, 0.5),
-        (57, 0.5),
-        (53, 0.5),
-        (55, 0.35),
-        (57, 0.35),
-        (58, 0.35),
-        (62, 0.9), // up into the clarion register
-        (38, 1.6), // low chalumeau — hollow and woody
-    ];
-
-    for (i, &(m, len)) in phrase.iter().enumerate() {
+fn phrase(out: &mut Vec<f32>, kind: WindKind, bright: f32, vib: f32, notes: &[(i32, f32)], breath: f32) {
+    let mut v = Wind::new(FS, kind);
+    v.set_vibrato(5.0, vib);
+    v.set_brightness(bright);
+    for (i, &(m, len)) in notes.iter().enumerate() {
         let note_n = (len * FS) as usize;
-        let hold = (note_n as f32 * 0.88) as usize;
-        // Slightly more breath on the accented long notes.
-        let breath = if len > 0.8 { 0.95 } else { 0.85 };
+        let hold = (note_n as f32 * 0.86) as usize;
         v.note_on(midi(m), breath);
         for j in 0..note_n {
             let t = j as f32 / note_n as f32;
-            // Gentle breath swell within each note.
-            v.set_breath(breath * (0.75 + 0.25 * (std::f32::consts::PI * t).sin()));
-            if j == hold && i != phrase.len() - 1 {
+            v.set_breath(breath * (0.78 + 0.22 * (std::f32::consts::PI * t).sin()));
+            if j == hold && i != notes.len() - 1 {
                 v.note_off();
             }
             out.push(v.process());
         }
     }
     v.note_off();
-    for _ in 0..(1.2 * FS) as usize {
+    for _ in 0..(0.9 * FS) as usize {
         out.push(v.process());
     }
+}
+
+fn main() -> std::io::Result<()> {
+    let mut out = Vec::new();
+
+    // Clarinet — a lyrical line into the low chalumeau.
+    phrase(&mut out, WindKind::Clarinet, 0.55, 0.16,
+        &[(62, 0.5), (65, 0.5), (69, 0.5), (70, 0.6), (69, 0.5), (65, 0.5), (62, 0.9), (50, 1.4)], 0.9);
+
+    // Alto sax — a bluesy, reedy phrase in the mid register.
+    phrase(&mut out, WindKind::Saxophone, 0.6, 0.25,
+        &[(63, 0.45), (65, 0.3), (66, 0.3), (68, 0.5), (66, 0.4), (63, 0.4), (61, 0.7), (58, 1.2)], 0.85);
+
+    // Trumpet — a bright fanfare.
+    phrase(&mut out, WindKind::Trumpet, 0.6, 0.12,
+        &[(60, 0.35), (64, 0.35), (67, 0.35), (72, 0.7), (67, 0.3), (72, 0.3), (74, 1.1), (72, 1.4)], 0.9);
 
     let peak = out.iter().fold(0.0f32, |mx, &x| mx.max(x.abs())).max(1e-9);
     write_wav("winds_demo.wav", &out, 0.89 / peak)?;

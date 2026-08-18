@@ -9,8 +9,13 @@ fn main() -> std::io::Result<()> {
     let midi: i32 = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(62);
     let bright: f32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.5);
     let breath: f32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.9);
+    let kind = match a.get(4).map(|s| s.as_str()) {
+        Some("sax") => WindKind::Saxophone,
+        Some("trumpet") => WindKind::Trumpet,
+        _ => WindKind::Clarinet,
+    };
     let f0 = 440.0 * 2f32.powf((midi as f32 - 69.0) / 12.0);
-    let mut v = Wind::new(FS, WindKind::Clarinet);
+    let mut v = Wind::new(FS, kind);
     v.set_brightness(bright);
     v.note_on(f0, breath);
     let n = (1.5 * FS) as usize;
