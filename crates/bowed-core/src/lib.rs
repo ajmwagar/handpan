@@ -176,6 +176,14 @@ pub struct Bowed {
     vib_phase: f32,
     vib_rate: f32,
     vib_depth: f32,
+    // Texture: bow-friction noise + onset scratch.
+    rng: u32,
+    noise_lp: f32,
+    noise_amt: f32,
+    attack: u32,
+    // Pizzicato excitation.
+    pluck_rem: u32,
+    pluck_amp: f32,
 }
 
 impl Bowed {
@@ -200,12 +208,30 @@ impl Bowed {
             vib_phase: 0.0,
             vib_rate: 5.5,
             vib_depth: 0.0,
+            rng: 0x1234_5678 ^ (kind as u32).wrapping_mul(0x9E37_79B9),
+            noise_lp: 0.0,
+            noise_amt: 0.12,
+            attack: 0,
+            pluck_rem: 0,
+            pluck_amp: 0.0,
         }
     }
 
     fn set_freq(&mut self, freq: f32) {
-        self.base_delay = (self.fs / freq - 2.0).max(4.0);
+        // Loop length must account for the extra sample of phase delay from the
+        // loss filter and the `last_out()` cache, otherwise the pitch runs flat.
+        // Empirically ~3.2 samples of excess round-trip delay.
+        self.base_delay = (self.fs / freq - 3.2).max(4.0);
         self.retune(0.0);
+    }
+
+    #[inline]
+    fn white(&mut self) -> f32 {
+        // xorshift32 → [-1, 1)
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        (self.rng as f32 / u32::MAX as f32) * 2.0 - 1.0
     }
 
     #[inline]
@@ -219,6 +245,8 @@ impl Bowed {
     pub fn note_on(&mut self, freq: f32, bow_velocity: f32, bow_pressure: f32) {
         self.set_freq(freq);
         self.set_bow(bow_velocity, bow_pressure);
+        // A short burst of extra friction noise as the bow catches the string.
+        self.attack = (0.03 * self.fs) as u32; // ~30 ms of onset scratch
     }
 
     /// Lift the bow — the string rings down.
@@ -226,10 +254,38 @@ impl Bowed {
         self.max_vel_target = 0.0;
     }
 
+    /// Pizzicato: pluck the string instead of bowing it. `velocity` in [0, 1].
+    /// The bow is lifted; the string is excited by a short noise burst injected
+    /// into the waveguide, then rings down through the body like a plucked note.
+    pub fn pluck(&mut self, freq: f32, velocity: f32) {
+        self.set_freq(freq);
+        self.max_vel_target = 0.0;
+        self.vel_env = 0.0;
+        self.pluck_rem = (0.004 * self.fs) as u32; // ~4 ms excitation
+        self.pluck_amp = 0.6 * velocity.clamp(0.0, 1.0);
+    }
+
     /// Continuous bow control (during a note): speed and pressure in [0, 1].
     pub fn set_bow(&mut self, bow_velocity: f32, bow_pressure: f32) {
         self.max_vel_target = 0.03 + 0.22 * bow_velocity.clamp(0.0, 1.0);
         self.slope = 1.0 + 4.0 * bow_pressure.clamp(0.0, 1.0);
+    }
+
+    /// Bow position along the string: 0 = sul tasto (over the fingerboard,
+    /// mellow), 1 = sul ponticello (near the bridge, glassy/bright).
+    pub fn set_bow_position(&mut self, pos: f32) {
+        // Map [0,1] onto a musical range of the fractional string position.
+        self.bow_pos = (0.06 + 0.14 * pos.clamp(0.0, 1.0)).clamp(0.02, 0.5);
+        self.retune(0.0);
+    }
+
+    /// Timbral brightness: string loss-filter pole. 0 = dark/damped,
+    /// 1 = bright/singing. (Also scales bow-friction noise a touch.)
+    pub fn set_brightness(&mut self, amount: f32) {
+        let a = amount.clamp(0.0, 1.0);
+        // Higher brightness → less high-frequency loss (lower pole).
+        self.string_filter.pole = 0.72 - 0.30 * a;
+        self.noise_amt = 0.06 + 0.14 * a;
     }
 
     /// Vibrato: rate (Hz) and depth (fraction of a semitone-ish).
@@ -252,11 +308,38 @@ impl Bowed {
             self.retune(self.vib_depth * mathf::sin(self.vib_phase));
         }
 
+        // Pizzicato: inject a short noise burst into the waveguide, no bowing.
+        if self.pluck_rem > 0 {
+            self.pluck_rem -= 1;
+            let exc = self.white() * self.pluck_amp;
+            let bridge_refl = -self.string_filter.tick(self.bridge.last_out());
+            let nut_refl = -self.neck.last_out();
+            self.neck.tick(bridge_refl + exc);
+            self.bridge.tick(nut_refl + exc);
+            let raw = self.bridge.last_out();
+            let mut b = 0.0;
+            for f in &mut self.body {
+                b += f.tick(raw);
+            }
+            return (raw * 0.5 + b * 0.9) * 4.0;
+        }
+
+        // Bow-friction noise: band-limited turbulence, scaled by how hard the
+        // bow is gripping (velocity) plus an onset-scratch burst at the attack.
+        let n = self.white();
+        self.noise_lp += 0.25 * (n - self.noise_lp); // ~one-pole ≈ 6 kHz
+        let mut scratch = 0.0;
+        if self.attack > 0 {
+            self.attack -= 1;
+            scratch = self.noise_lp * 0.5 * (self.attack as f32 / (0.03 * self.fs));
+        }
+        let noise = self.noise_lp * self.noise_amt * self.vel_env + scratch;
+
         // String velocity at the bow point from the two returning waves.
         let bridge_refl = -self.string_filter.tick(self.bridge.last_out());
         let nut_refl = -self.neck.last_out();
         let string_vel = bridge_refl + nut_refl;
-        let delta = self.vel_env - string_vel;
+        let delta = (self.vel_env + noise) - string_vel;
         let new_vel = delta * bow_friction(delta, self.slope);
         self.neck.tick(bridge_refl + new_vel);
         self.bridge.tick(nut_refl + new_vel);
@@ -307,5 +390,68 @@ mod tests {
             }
             assert!(tail < peak_bowed, "{kind:?} did not decay after note_off");
         }
+    }
+
+    /// Measure the fundamental via autocorrelation and confirm we're in tune.
+    fn measured_hz(v: &mut Bowed, fs: f32, settle: usize, window: usize) -> f32 {
+        for _ in 0..settle {
+            v.process();
+        }
+        let buf: Vec<f32> = (0..window).map(|_| v.process()).collect();
+        // Autocorrelation peak search over a musical lag range (60–1200 Hz).
+        let lo = (fs / 1200.0) as usize;
+        let hi = (fs / 60.0) as usize;
+        let mut best_lag = lo;
+        let mut best = f32::MIN;
+        for lag in lo..hi.min(window / 2) {
+            let mut s = 0.0;
+            for i in 0..window - lag {
+                s += buf[i] * buf[i + lag];
+            }
+            if s > best {
+                best = s;
+                best_lag = lag;
+            }
+        }
+        fs / best_lag as f32
+    }
+
+    #[test]
+    fn tuning_is_accurate() {
+        let fs = 48_000.0;
+        // A4 on the violin.
+        let mut v = Bowed::new(fs, StringKind::Violin);
+        v.note_on(440.0, 0.7, 0.5);
+        let f = measured_hz(&mut v, fs, 24_000, 8_192);
+        let cents = 1200.0 * (f / 440.0).log2();
+        assert!(cents.abs() < 15.0, "violin A4 off by {cents:.1} cents ({f:.1} Hz)");
+
+        // C3 on the cello.
+        let mut c = Bowed::new(fs, StringKind::Cello);
+        c.note_on(130.81, 0.7, 0.5);
+        let f = measured_hz(&mut c, fs, 24_000, 16_384);
+        let cents = 1200.0 * (f / 130.81).log2();
+        assert!(cents.abs() < 15.0, "cello C3 off by {cents:.1} cents ({f:.1} Hz)");
+    }
+
+    #[test]
+    fn pizzicato_rings_and_decays() {
+        let fs = 48_000.0;
+        let mut v = Bowed::new(fs, StringKind::Cello);
+        v.pluck(196.0, 0.9);
+        let mut peak = 0.0f32;
+        for _ in 0..2_400 {
+            peak = peak.max(v.process().abs());
+        }
+        assert!(peak > 0.02, "pluck too quiet: {peak}");
+        // Let it ring out; it must not self-sustain (no bow energy).
+        for _ in 0..fs as usize * 2 {
+            v.process();
+        }
+        let mut tail = 0.0f32;
+        for _ in 0..4_800 {
+            tail = tail.max(v.process().abs());
+        }
+        assert!(tail < peak * 0.5, "pluck did not decay: tail {tail} vs peak {peak}");
     }
 }
