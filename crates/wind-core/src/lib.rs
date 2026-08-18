@@ -187,7 +187,22 @@ pub struct Wind {
     lip_b0: f32,
     lip_y1: f32,
     lip_y2: f32,
+    lip_x1: f32,
+    lip_x2: f32,
     bright: f32,
+    // Brass bell + lip drive: negative-resistance valve gain, lip/note ratio,
+    // lip pole radius (Q), tuning trim, wave-steepening amount, bell radiation
+    // mix, bell one-pole state, stored bore delay, and a slow DC tracker so the
+    // brassiness steepening keeps all harmonics without pulling pitch.
+    lip_drive: f32,
+    lip_factor: f32,
+    lip_r: f32,
+    tune_trim: f32,
+    brass: f32,
+    bell_mix: f32,
+    bell_y1: f32,
+    bore_delay: f32,
+    brass_dc: f32,
 
     // Flute (air-jet) state: `jet` is the embouchure air-jet delay line (length
     // = jet_ratio·bore); `jdc_*` DC-blocks the reflected bore pressure; the
@@ -251,8 +266,9 @@ impl Wind {
             // Saxophone reed: same table, a touch grippier; breathier. Higher
             // output gain compensates for the steep radiation low-pass.
             WindKind::Saxophone => (0.7, -0.50, 3.5, 0.10),
-            // Trumpet uses the lip resonator, not the reed table.
-            WindKind::Trumpet => (0.0, 0.0, 2.0, 0.04),
+            // Trumpet uses the lip resonator, not the reed table; noise seeds
+            // a natural onset.
+            WindKind::Trumpet => (0.0, 0.0, 2.0, 0.03),
         };
         // Reflection: clarinet inverts (odd-harmonic, quarter-wave); the
         // conical sax and the brass bore are effectively open (all harmonics),
@@ -266,7 +282,9 @@ impl Wind {
             // Real alto sax is fundamental-dominant with a steep roll-off, so
             // the conical loop is fairly dark (not the buzzy bright first try).
             WindKind::Saxophone => (-0.97, 0.66),
-            WindKind::Trumpet => (-0.90, 0.55),
+            // Trumpet: loss = low-freq bell reflection gain; damp = the bell
+            // one-pole low-pass coeff (~1.2 kHz cutoff at bright 0.5).
+            WindKind::Trumpet => (0.99, 0.82),
         };
         let radiate = match kind {
             // Clarinet: presence lift restoring the sub-cutoff harmonics + a
@@ -286,7 +304,7 @@ impl Wind {
             // Trumpet: the brass formant ("bridge") sits ~1.2–1.5 kHz — that is
             // where the real Iowa trumpet peaks (its h4), not up at 2.4 kHz.
             WindKind::Trumpet => {
-                [Peaking::new(1000.0, 0.8, 3.0, fs), Peaking::new(1500.0, 1.0, 4.0, fs)]
+                [Peaking::new(1200.0, 1.0, 11.0, fs), Peaking::new(4500.0, 0.7, -4.0, fs)]
             }
         };
         // Flute jet parameters (jet_ratio, jet_refl, end_refl, tune_scale,
@@ -321,7 +339,18 @@ impl Wind {
             lip_b0: 0.0,
             lip_y1: 0.0,
             lip_y2: 0.0,
+            lip_x1: 0.0,
+            lip_x2: 0.0,
             bright: 0.5,
+            lip_drive: -0.7,
+            lip_factor: 1.0,
+            lip_r: 0.98,
+            tune_trim: -1.0,
+            brass: if matches!(kind, WindKind::Trumpet) { 90.0 } else { 0.0 },
+            bell_mix: 0.92,
+            bell_y1: 0.0,
+            bore_delay: 100.0,
+            brass_dc: 0.0,
             breath_target: 0.0,
             breath_env: 0.0,
             attack_rate: 0.0,
@@ -351,7 +380,7 @@ impl Wind {
                     // oscillation: a steep roll-off gives the sax its
                     // fundamental-dominant body and rolls the trumpet's top off.
                     WindKind::Saxophone => 950.0,
-                    WindKind::Trumpet => 2200.0,
+                    WindKind::Trumpet => 3000.0,
                 };
                 mathf::exp(-core::f32::consts::TAU * fc / fs)
             },
@@ -377,11 +406,14 @@ impl Wind {
             WindKind::Clarinet => self.fs / self.freq * 0.5 - 1.0 - fgd,
             // Open–open jet bore: full period, scaled/offset to hit pitch.
             WindKind::Flute => self.fs / self.freq * self.tune_scale - self.tune_off - 1.0 - fgd,
-            // Conical / brass bores are effectively open (non-inverting loop):
-            // a full open pipe → all harmonics.
-            WindKind::Saxophone | WindKind::Trumpet => self.fs / self.freq - 1.0 - fgd,
+            // Conical sax bore: effectively open (non-inverting loop), all harmonics.
+            WindKind::Saxophone => self.fs / self.freq - 1.0 - fgd,
+            // Brass bore: non-inverting all-harmonic loop; the tune_trim absorbs
+            // the cache term and the bell-filter delay.
+            WindKind::Trumpet => self.fs / self.freq - fgd + self.tune_trim,
         };
         let d = d.max(4.0);
+        self.bore_delay = d;
         self.bore.set_delay(d);
         if self.kind == WindKind::Flute {
             self.jet.set_delay((d * self.jet_ratio).max(1.0));
@@ -391,14 +423,15 @@ impl Wind {
         }
     }
 
-    /// Tune the trumpet's lip resonator to a buzzing frequency near the note.
+    /// Tune the trumpet's lip resonator (a normalized band-pass, peak gain 1) to
+    /// a buzzing frequency near the note.
     fn tune_lip(&mut self, freq: f32) {
-        let w = core::f32::consts::TAU * freq / self.fs;
-        let q = 6.0;
-        let r = mathf::exp(-core::f32::consts::PI * freq / (q * self.fs));
+        let lf = freq * self.lip_factor;
+        let w = core::f32::consts::TAU * lf / self.fs;
+        let r = self.lip_r;
         self.lip_a1 = 2.0 * r * mathf::cos(w);
         self.lip_a2 = -(r * r);
-        self.lip_b0 = (1.0 - r) * mathf::sin(w);
+        self.lip_b0 = 0.5 - 0.5 * r * r; // normalized band-pass (peak = 1)
     }
 
     #[inline]
@@ -454,7 +487,8 @@ impl Wind {
             // Narrow swing around 0.60 — a wide swing destabilizes the jet.
             WindKind::Flute => 0.64 - 0.08 * a,
             WindKind::Saxophone => 0.72 - 0.12 * a,
-            WindKind::Trumpet => 0.70 - 0.35 * a,
+            // Moves the bell cutoff (brighter = higher cutoff = smaller g).
+            WindKind::Trumpet => 0.87 - 0.10 * a,
         };
         self.update_delay(); // cutoff change shifts group delay → keep in tune
     }
@@ -533,29 +567,44 @@ impl Wind {
                 let jet = (pd * (pd * pd - 1.0)).clamp(-1.0, 1.0);
                 0.3 * self.bore.tick(jet + self.end_refl * temp)
             }
-            // Lip reed (trumpet): the buzzing-lip resonator, driven by the
-            // pressure across the lips, gates the airflow through a one-way
-            // valve into the (all-harmonic) brass bore.
+            // Lip reed + flared bell (trumpet). The bell is a real
+            // frequency-dependent reflection: a one-pole low-pass reflects the
+            // lows back into the bore (forming the standing waves) while the
+            // highs radiate out — so the emitted sound is the high-pass
+            // *transmission*, which is why brass has a weak fundamental and a
+            // strong bright mid-harmonic cluster.
             WindKind::Trumpet => {
-                let bore_p = self.refl.tick(self.bore.last_out());
-                let delta = breath - bore_p;
-                let lip =
-                    self.lip_b0 * delta + self.lip_a1 * self.lip_y1 + self.lip_a2 * self.lip_y2;
+                let bore_out = self.bore.last_out();
+                // Flared-bell one-pole low-pass at the bell cutoff (~1.2 kHz).
+                let g = self.refl.damp;
+                self.bell_y1 = (1.0 - g) * bore_out + g * self.bell_y1;
+                let lp = self.bell_y1;
+                // Reflection that stays in the bore (non-inverting → all harmonics).
+                let reflected = self.refl.loss * lp;
+                // Lip resonator: normalized band-pass of the pressure across the lips.
+                let delta = breath - reflected;
+                let lip = self.lip_b0 * (delta - self.lip_x2)
+                    + self.lip_a1 * self.lip_y1
+                    + self.lip_a2 * self.lip_y2;
+                self.lip_x2 = self.lip_x1;
+                self.lip_x1 = delta;
                 self.lip_y2 = self.lip_y1;
                 self.lip_y1 = lip;
-                // One-way lip valve: the lips open around a rest position and
-                // slam shut (can't invert) — the nonlinearity that sustains.
-                let area = (lip + 0.7).clamp(0.0, 1.0);
-                self.bore.tick(bore_p + area * delta)
+                // One-way lip valve; drive is NEGATIVE (negative resistance → sustains).
+                let area = (self.lip_drive * lip).clamp(0.0, 1.0);
+                let inj = reflected + area * delta;
+                // Brassiness = wave steepening: high-pressure fronts travel
+                // faster → the bore delay shortens with pressure. DC-blocked so
+                // the mean delay (pitch) is fixed while harmonics brighten.
+                let bl = (0.6 + 0.4 * self.bright) * self.breath_env;
+                self.brass_dc += 0.001 * (bore_out - self.brass_dc);
+                let dmod = (self.brass * bl * (bore_out - self.brass_dc)).clamp(-3.0, 3.0);
+                self.bore.set_delay(self.bore_delay - dmod);
+                self.bore.tick(inj);
+                // Radiated output = bell transmission (high-shelf complement).
+                bore_out - self.bell_mix * lp
             }
         };
-
-        // Brassiness: amplitude-dependent wave steepening — the bright blare a
-        // trumpet develops when pushed. A cubic term (odd harmonics) that grows
-        // with level; harmless on soft notes, edgy on loud ones.
-        if self.kind == WindKind::Trumpet {
-            out += 0.10 * self.bright * out * out * out;
-        }
 
         // Bell/tone-hole radiation: a small squared (even-harmonic) term the
         // ideal cylinder can't produce — only the clarinet needs it (the sax
