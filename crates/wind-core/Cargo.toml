@@ -22,3 +22,7 @@ required-features = ["std"]
 [[example]]
 name = "probe"
 required-features = ["std"]
+
+[[example]]
+name = "render_ensemble"
+required-features = ["std"]

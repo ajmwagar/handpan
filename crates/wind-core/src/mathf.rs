@@ -25,6 +25,11 @@ pub fn powf(a: f32, b: f32) -> f32 {
 pub fn floor(x: f32) -> f32 {
     x.floor()
 }
+#[cfg(feature = "std")]
+#[inline]
+pub fn sqrt(x: f32) -> f32 {
+    x.sqrt()
+}
 
 #[cfg(all(not(feature = "std"), feature = "libm"))]
 #[inline]
@@ -50,4 +55,9 @@ pub fn powf(a: f32, b: f32) -> f32 {
 #[inline]
 pub fn floor(x: f32) -> f32 {
     libm::floorf(x)
+}
+#[cfg(all(not(feature = "std"), feature = "libm"))]
+#[inline]
+pub fn sqrt(x: f32) -> f32 {
+    libm::sqrtf(x)
 }
