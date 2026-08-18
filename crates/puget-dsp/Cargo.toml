@@ -1,0 +1,16 @@
+[package]
+name = "puget-dsp"
+version = "0.1.0"
+edition = "2021"
+authors = ["Avery Wagar"]
+description = "Shared no_std DSP foundation for the Puget physical-modeling cores: feature-gated math and the generic humanized Ensemble"
+license-file = "../../LICENSE"
+publish = false
+
+[features]
+default = ["std"]
+std = []
+libm = ["dep:libm"]
+
+[dependencies]
+libm = { version = "0.2", optional = true }

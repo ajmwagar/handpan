@@ -41,8 +41,8 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 
-#[allow(dead_code)]
-mod mathf;
+use puget_dsp::mathf;
+use puget_dsp::{Ensemble, Voice};
 
 /// Fractional delay line (linear interpolation) — one half of the string.
 struct Delay {
@@ -618,207 +618,92 @@ impl BowedInstrument {
     }
 }
 
-/// Deterministic per-chair hash → [-1, 1] (stable spread, uncorrelated chairs).
-#[inline]
-fn chair_hash(i: u32) -> f32 {
-    let mut x = i.wrapping_mul(0x9E37_79B9) ^ 0x5F35_6495;
-    x ^= x >> 15;
-    x = x.wrapping_mul(0x85EB_CA6B);
-    x ^= x >> 13;
-    (x as f32 / u32::MAX as f32) * 2.0 - 1.0
+/// How a section note is played on each string: bowed (arco) or plucked (pizz).
+#[derive(Clone, Copy)]
+pub enum BowEvent {
+    Arco { velocity: f32, pressure: f32 },
+    Pizz { velocity: f32 },
 }
 
-/// 2^x = e^(x·ln2) — keeps the ensemble no_std/dependency-free.
-#[inline]
-fn exp2(x: f32) -> f32 {
-    mathf::exp(x * core::f32::consts::LN_2)
+impl Voice for Bowed {
+    type Event = BowEvent;
+    fn humanize(&mut self, seed: u32) {
+        Bowed::humanize(self, seed);
+    }
+    fn trigger(&mut self, freq: f32, ev: BowEvent) {
+        match ev {
+            BowEvent::Arco { velocity, pressure } => self.note_on(freq, velocity, pressure),
+            BowEvent::Pizz { velocity } => self.pluck(freq, velocity),
+        }
+    }
+    fn release(&mut self) {
+        self.note_off();
+    }
+    fn process(&mut self) -> f32 {
+        Bowed::process(self)
+    }
 }
 
-/// One player in the string section: a [`Bowed`] voice (its own string + body)
-/// plus its fixed humanization (intonation, pan, gain, bow stagger).
-struct Desk {
-    voice: Bowed,
-    detune_norm: f32,
-    detune_ratio: f32,
-    pan_norm: f32,
-    pan_l: f32,
-    pan_r: f32,
-    gain: f32,
-    vib_scale: f32,
-    stagger: u32,
-    pend: Option<(f32, f32, f32)>, // (freq, vel, pressure) held until the bow lands
-    countdown: u32,
-    is_pluck: bool,
-}
-
-/// A **string section**: many humanized [`Bowed`] players stacked and spread
-/// across the stereo field, so a single line blooms into a whole desk of
-/// strings — the shimmer of a real section coming from intonation spread,
-/// desynced vibrato, staggered bows and independent bow noise. The `desks`
-/// count is the "how many players" control (an encoder/button on a module).
+/// A **string section**: humanized [`Bowed`] players (each its own string +
+/// body) stacked across the stereo field (the shared [`Ensemble`]). The desk
+/// count is the "how many players" control; `set_spread`/`set_width` are the
+/// tuning and stereo-image macros. Supports arco and pizzicato.
 pub struct BowedEnsemble {
-    players: Vec<Desk>,
-    desks: usize,
-    spread_cents: f32,
+    section: Ensemble<Bowed>,
 }
 
 impl BowedEnsemble {
-    /// Create a section with up to `max_desks` players (allocated once).
-    /// `spread_cents` is the intonation spread across the section (~6 is lush).
+    /// A section of up to `max_desks` players, `spread_cents` intonation spread.
     pub fn new(fs: f32, kind: StringKind, max_desks: usize, spread_cents: f32) -> Self {
-        let max = max_desks.max(1);
-        let mut players = Vec::with_capacity(max);
-        for i in 0..max {
-            let mut voice = Bowed::new(fs, kind);
-            voice.humanize(0x51ED_2A17 ^ (i as u32).wrapping_mul(0x9E37_79B9));
-            // Desk 0 is the leader: on pitch, centred. Others spread out.
-            let (dnorm, pan, gvar, vib, stag) = if i == 0 {
-                (0.0, 0.0, 1.0, 1.0, 0)
-            } else {
-                let d = chair_hash(i as u32 * 4 + 1);
-                let p = chair_hash(i as u32 * 4 + 2);
-                let g = 0.85 + 0.15 * chair_hash(i as u32 * 4 + 3).abs();
-                let v = 0.85 + 0.30 * ((chair_hash(i as u32 * 4 + 3) + 1.0) * 0.5);
-                // Bows don't land together — up to ~40 ms of onset spread.
-                let s = (0.5 * (chair_hash(i as u32 * 4 + 4) + 1.0) * 0.040 * fs) as u32;
-                (d, p, g, v, s)
-            };
-            let theta = (pan + 1.0) * 0.25 * core::f32::consts::PI; // equal-power pan
-            players.push(Desk {
-                voice,
-                detune_norm: dnorm,
-                detune_ratio: exp2(dnorm * spread_cents / 1200.0),
-                pan_norm: pan,
-                pan_l: mathf::cos(theta),
-                pan_r: mathf::sin(theta),
-                gain: gvar,
-                vib_scale: vib,
-                stagger: stag,
-                pend: None,
-                countdown: 0,
-                is_pluck: false,
-            });
-        }
-        BowedEnsemble { players, desks: 1, spread_cents }
+        // Bows don't land together — up to ~40 ms of onset spread.
+        let section = Ensemble::new(fs, max_desks, spread_cents, 40.0, |_| Bowed::new(fs, kind));
+        BowedEnsemble { section }
     }
 
-    /// Intonation spread across the section, in cents — the "intimate consort ↔
-    /// wide orchestra" knob. 0 = pure unison (still shimmering from desynced
-    /// vibrato/bows); ~6 = a rich section. Takes effect on the next `note_on`.
-    pub fn set_spread(&mut self, cents: f32) {
-        self.spread_cents = cents.max(0.0);
-        for d in self.players.iter_mut() {
-            d.detune_ratio = exp2(d.detune_norm * self.spread_cents / 1200.0);
-        }
-    }
-
-    /// Stereo width of the section, 0..1 — collapses the desks toward the centre
-    /// (0 = mono) or opens them to the full field (1). A macro control, typically
-    /// the expander's Width CV + attenuverter over an offset.
-    pub fn set_width(&mut self, width: f32) {
-        let w = width.clamp(0.0, 1.0);
-        for d in self.players.iter_mut() {
-            let theta = (d.pan_norm * w + 1.0) * 0.25 * core::f32::consts::PI;
-            d.pan_l = mathf::cos(theta);
-            d.pan_r = mathf::sin(theta);
-        }
-    }
-
-    /// How many players are sounding (the "desks" encoder). Clamped to `[1, max]`.
+    /// How many players are sounding (the "desks" encoder), clamped `[1, max]`.
     pub fn set_desks(&mut self, n: usize) {
-        self.desks = n.clamp(1, self.players.len());
+        self.section.set_active(n);
     }
-
     /// Number of active desks.
     pub fn desks(&self) -> usize {
-        self.desks
+        self.section.active()
     }
-
-    /// Bow a note across the whole section (each desk detuned + bow-staggered).
+    /// Intonation spread across the section, in cents (intimate ↔ wide).
+    pub fn set_spread(&mut self, cents: f32) {
+        self.section.set_spread(cents);
+    }
+    /// Stereo width, 0..1 (mono ↔ full field).
+    pub fn set_width(&mut self, width: f32) {
+        self.section.set_width(width);
+    }
+    /// Bow a note across the section.
     pub fn note_on(&mut self, freq: f32, bow_velocity: f32, bow_pressure: f32) {
-        for d in self.players.iter_mut().take(self.desks) {
-            let f = freq * d.detune_ratio;
-            d.is_pluck = false;
-            if d.stagger == 0 {
-                d.voice.note_on(f, bow_velocity, bow_pressure);
-                d.pend = None;
-                d.countdown = 0;
-            } else {
-                d.pend = Some((f, bow_velocity, bow_pressure));
-                d.countdown = d.stagger;
-            }
-        }
+        self.section.trigger(freq, BowEvent::Arco { velocity: bow_velocity, pressure: bow_pressure });
     }
-
-    /// Pizzicato across the section (each desk detuned + slightly staggered).
+    /// Pizzicato across the section.
     pub fn pluck(&mut self, freq: f32, velocity: f32) {
-        for d in self.players.iter_mut().take(self.desks) {
-            let f = freq * d.detune_ratio;
-            d.is_pluck = true;
-            if d.stagger == 0 {
-                d.voice.pluck(f, velocity);
-                d.pend = None;
-                d.countdown = 0;
-            } else {
-                d.pend = Some((f, velocity, 0.0));
-                d.countdown = d.stagger;
-            }
-        }
+        self.section.trigger(freq, BowEvent::Pizz { velocity });
     }
-
-    /// Release the whole section (bows lift; strings ring down).
+    /// Release the section (bows lift; strings ring down).
     pub fn note_off(&mut self) {
-        for d in self.players.iter_mut().take(self.desks) {
-            d.voice.note_off();
-            d.pend = None;
-            d.countdown = 0;
-        }
+        self.section.release();
     }
-
-    /// Vibrato — depth shared, rate spread per desk (the section shimmer).
+    /// Vibrato — depth shared, rate spread per desk.
     pub fn set_vibrato(&mut self, rate_hz: f32, depth: f32) {
-        for d in self.players.iter_mut() {
-            d.voice.set_vibrato(rate_hz * d.vib_scale, depth);
-        }
+        self.section.for_each_voice(|v, s| v.set_vibrato(rate_hz * s, depth));
     }
-
-    /// Bow position for the whole section: 0 = sul tasto, 1 = sul ponticello.
+    /// Bow position, section-wide (0 = sul tasto, 1 = sul ponticello).
     pub fn set_bow_position(&mut self, pos: f32) {
-        for d in self.players.iter_mut() {
-            d.voice.set_bow_position(pos);
-        }
+        self.section.for_each_voice(|v, _| v.set_bow_position(pos));
     }
-
-    /// Brightness for the whole section.
+    /// Brightness, section-wide.
     pub fn set_brightness(&mut self, amount: f32) {
-        for d in self.players.iter_mut() {
-            d.voice.set_brightness(amount);
-        }
+        self.section.for_each_voice(|v, _| v.set_brightness(amount));
     }
-
     /// One stereo sample of the whole section.
     #[inline]
     pub fn process(&mut self) -> (f32, f32) {
-        let (mut l, mut r) = (0.0, 0.0);
-        let makeup = 1.0 / mathf::sqrt(self.desks as f32);
-        for d in self.players.iter_mut().take(self.desks) {
-            if d.countdown > 0 {
-                d.countdown -= 1;
-                if d.countdown == 0 {
-                    if let Some((f, a, b)) = d.pend.take() {
-                        if d.is_pluck {
-                            d.voice.pluck(f, a);
-                        } else {
-                            d.voice.note_on(f, a, b);
-                        }
-                    }
-                }
-            }
-            let s = d.voice.process() * d.gain * makeup;
-            l += s * d.pan_l;
-            r += s * d.pan_r;
-        }
-        (l, r)
+        self.section.process()
     }
 }
 

@@ -39,8 +39,8 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 
-#[allow(dead_code)]
-mod mathf;
+use puget_dsp::mathf;
+use puget_dsp::{Ensemble, Voice};
 
 /// Fractional delay line (linear interpolation) — the bore air column.
 struct Delay {
@@ -674,198 +674,83 @@ impl Wind {
     }
 }
 
-/// Deterministic per-chair hash → [-1, 1], so a section's spread is stable
-/// across runs but uncorrelated between chairs.
-#[inline]
-fn chair_hash(i: u32) -> f32 {
-    let mut x = i.wrapping_mul(0x9E37_79B9) ^ 0x5F35_6495;
-    x ^= x >> 15;
-    x = x.wrapping_mul(0x85EB_CA6B);
-    x ^= x >> 13;
-    (x as f32 / u32::MAX as f32) * 2.0 - 1.0
+impl Voice for Wind {
+    type Event = f32; // breath pressure
+    fn humanize(&mut self, seed: u32) {
+        Wind::humanize(self, seed);
+    }
+    fn trigger(&mut self, freq: f32, breath: f32) {
+        self.note_on(freq, breath);
+    }
+    fn release(&mut self) {
+        self.note_off();
+    }
+    fn process(&mut self) -> f32 {
+        Wind::process(self)
+    }
 }
 
-/// One player in a section: a voice plus its fixed humanization (detune, pan,
-/// gain, onset stagger).
-struct Chair {
-    wind: Wind,
-    detune_norm: f32,  // fixed per-chair tuning offset in [-1, 1]
-    detune_ratio: f32, // frequency multiplier = 2^(detune_norm·spread/1200)
-    pan_norm: f32,     // fixed per-chair pan position in [-1, 1]
-    pan_l: f32,
-    pan_r: f32,
-    gain: f32,
-    vib_scale: f32, // per-chair vibrato-rate spread
-    stagger: u32,   // onset delay (samples) before this chair starts a note
-    // Pending note (held until the stagger elapses so attacks aren't synced).
-    pend: Option<(f32, f32)>,
-    countdown: u32,
-}
-
-/// A **section** of one instrument: several humanized copies stacked and spread
-/// across the stereo field, so it sounds like a whole desk of players rather
-/// than one loud unison. The `chairs` count is the "how many players" control
-/// (an encoder/button on a module). Each chair is detuned a few cents, panned,
-/// level-varied, vibrato-desynced, and attack-staggered — the ingredients of a
-/// real section's lush, massive sound.
+/// A **section** of one wind instrument: humanized copies stacked and spread
+/// across the stereo field (the shared [`Ensemble`]). The chair count is the
+/// "how many players" control; `set_spread`/`set_width` are the tuning and
+/// stereo-image macros; breath/vibrato/brightness fan out to every chair.
 pub struct WindEnsemble {
-    voices: Vec<Chair>,
-    chairs: usize,
-    spread_cents: f32,
+    section: Ensemble<Wind>,
 }
 
 impl WindEnsemble {
-    /// Create a section with up to `max_chairs` players (allocated once).
-    /// `spread_cents` is the detune spread across the section (~7 is lush).
+    /// A section of up to `max_chairs` players, `spread_cents` tuning spread.
     pub fn new(fs: f32, kind: WindKind, max_chairs: usize, spread_cents: f32) -> Self {
-        let max = max_chairs.max(1);
-        let mut voices = Vec::with_capacity(max);
-        for i in 0..max {
-            let mut wind = Wind::new(fs, kind);
-            wind.humanize(0x51ED_2A17 ^ (i as u32).wrapping_mul(0x9E37_79B9));
-            // Chair 0 is the "principal": on pitch, centred. Others spread.
-            let (dnorm, pan, gvar, vib, stag) = if i == 0 {
-                (0.0, 0.0, 1.0, 1.0, 0)
-            } else {
-                let d = chair_hash(i as u32 * 4 + 1);
-                let p = chair_hash(i as u32 * 4 + 2);
-                let g = 0.88 + 0.12 * chair_hash(i as u32 * 4 + 3).abs();
-                let v = 0.90 + 0.20 * ((chair_hash(i as u32 * 4 + 3) + 1.0) * 0.5);
-                let s = (0.5 * (chair_hash(i as u32 * 4 + 4) + 1.0) * 0.020 * fs) as u32; // 0–20 ms
-                (d, p, g, v, s)
-            };
-            let theta = (pan + 1.0) * 0.25 * core::f32::consts::PI; // equal-power pan
-            voices.push(Chair {
-                wind,
-                detune_norm: dnorm,
-                detune_ratio: exp2(dnorm * spread_cents / 1200.0),
-                pan_norm: pan,
-                pan_l: mathf::cos(theta),
-                pan_r: mathf::sin(theta),
-                gain: gvar,
-                vib_scale: vib,
-                stagger: stag,
-                pend: None,
-                countdown: 0,
-            });
-        }
-        WindEnsemble { voices, chairs: 1, spread_cents }
+        // Up to ~20 ms of onset stagger so attacks aren't perfectly synced.
+        let section = Ensemble::new(fs, max_chairs, spread_cents, 20.0, |_| Wind::new(fs, kind));
+        WindEnsemble { section }
     }
 
-    /// Detune spread across the section, in cents — the "intimate consort ↔ wide
-    /// orchestra" knob. 0 = pure unison (still lush from desynced vibrato/air);
-    /// ~7 = a rich section. Takes effect on the next `note_on`.
-    pub fn set_spread(&mut self, cents: f32) {
-        self.spread_cents = cents.max(0.0);
-        for c in self.voices.iter_mut() {
-            c.detune_ratio = exp2(c.detune_norm * self.spread_cents / 1200.0);
-        }
-    }
-
-    /// Stereo width of the section, 0..1 — collapses the chairs toward the
-    /// centre (0 = mono) or opens them to the full field (1). A macro control,
-    /// typically the expander's Width CV + attenuverter over an offset.
-    pub fn set_width(&mut self, width: f32) {
-        let w = width.clamp(0.0, 1.0);
-        for c in self.voices.iter_mut() {
-            let theta = (c.pan_norm * w + 1.0) * 0.25 * core::f32::consts::PI;
-            c.pan_l = mathf::cos(theta);
-            c.pan_r = mathf::sin(theta);
-        }
-    }
-
-    /// How many players are sounding (the "chairs" encoder). Clamped to
-    /// `[1, max_chairs]`.
+    /// How many players are sounding (the "chairs" encoder), clamped `[1, max]`.
     pub fn set_chairs(&mut self, n: usize) {
-        self.chairs = n.clamp(1, self.voices.len());
+        self.section.set_active(n);
     }
-
     /// Number of active chairs.
     pub fn chairs(&self) -> usize {
-        self.chairs
+        self.section.active()
     }
-
-    /// Start a note across the whole section (each chair detuned + attack-staggered).
+    /// Detune spread across the section, in cents (intimate ↔ wide).
+    pub fn set_spread(&mut self, cents: f32) {
+        self.section.set_spread(cents);
+    }
+    /// Stereo width, 0..1 (mono ↔ full field).
+    pub fn set_width(&mut self, width: f32) {
+        self.section.set_width(width);
+    }
+    /// Start a note across the section.
     pub fn note_on(&mut self, freq: f32, breath: f32) {
-        for c in self.voices.iter_mut().take(self.chairs) {
-            let f = freq * c.detune_ratio;
-            if c.stagger == 0 {
-                c.wind.note_on(f, breath * c.gain);
-                c.pend = None;
-                c.countdown = 0;
-            } else {
-                // Hold the note until this chair's onset delay elapses.
-                c.pend = Some((f, breath * c.gain));
-                c.countdown = c.stagger;
-            }
-        }
+        self.section.trigger(freq, breath);
     }
-
-    /// Release the whole section.
+    /// Release the section.
     pub fn note_off(&mut self) {
-        for c in self.voices.iter_mut().take(self.chairs) {
-            c.wind.note_off();
-            c.pend = None;
-            c.countdown = 0;
-        }
+        self.section.release();
     }
-
-    /// Vibrato for the section — depth shared, rate spread per chair (desync).
+    /// Vibrato — depth shared, rate spread per chair.
     pub fn set_vibrato(&mut self, rate_hz: f32, depth: f32) {
-        for c in self.voices.iter_mut() {
-            c.wind.set_vibrato(rate_hz * c.vib_scale, depth);
-        }
+        self.section.for_each_voice(|v, s| v.set_vibrato(rate_hz * s, depth));
     }
-
-    /// Brightness for the whole section.
+    /// Brightness, section-wide.
     pub fn set_brightness(&mut self, amount: f32) {
-        for c in self.voices.iter_mut() {
-            c.wind.set_brightness(amount);
-        }
+        self.section.for_each_voice(|v, _| v.set_brightness(amount));
     }
-
-    /// Breath-mod CV (normalled to each chair's onboard LFO), applied section-wide.
-    pub fn set_breath_mod(&mut self, cv: Option<f32>) {
-        for c in self.voices.iter_mut() {
-            c.wind.set_breath_mod(cv);
-        }
-    }
-
-    /// Continuous breath for the section (each chair keeps its level variation).
+    /// Continuous breath, section-wide.
     pub fn set_breath(&mut self, breath: f32) {
-        for c in self.voices.iter_mut().take(self.chairs) {
-            c.wind.set_breath(breath * c.gain);
-        }
+        self.section.for_each_voice(|v, _| v.set_breath(breath));
     }
-
+    /// Breath-mod CV (normalled to each chair's LFO), section-wide.
+    pub fn set_breath_mod(&mut self, cv: Option<f32>) {
+        self.section.for_each_voice(|v, _| v.set_breath_mod(cv));
+    }
     /// One stereo sample of the whole section.
     #[inline]
     pub fn process(&mut self) -> (f32, f32) {
-        let (mut l, mut r) = (0.0, 0.0);
-        // Equal-power-ish makeup: a section is a bit louder than a soloist but
-        // not by the full voice count.
-        let makeup = 1.0 / mathf::sqrt(self.chairs as f32);
-        for c in self.voices.iter_mut().take(self.chairs) {
-            if c.countdown > 0 {
-                c.countdown -= 1;
-                if c.countdown == 0 {
-                    if let Some((f, b)) = c.pend.take() {
-                        c.wind.note_on(f, b);
-                    }
-                }
-            }
-            let s = c.wind.process() * c.gain * makeup;
-            l += s * c.pan_l;
-            r += s * c.pan_r;
-        }
-        (l, r)
+        self.section.process()
     }
-}
-
-// 2^x = e^(x·ln2) — keeps the ensemble no_std/dependency-free.
-#[inline]
-fn exp2(x: f32) -> f32 {
-    mathf::exp(x * core::f32::consts::LN_2)
 }
 
 #[cfg(all(test, feature = "std"))]

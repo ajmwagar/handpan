@@ -9,11 +9,12 @@ publish = false
 
 [features]
 default = ["std"]
-std = []
-libm = ["dep:libm"]
+std = ["puget-dsp/std"]
+libm = ["dep:libm", "puget-dsp/libm"]
 
 [dependencies]
 libm = { version = "0.2", optional = true }
+puget-dsp = { path = "../puget-dsp", default-features = false }
 
 [[example]]
 name = "render_winds"

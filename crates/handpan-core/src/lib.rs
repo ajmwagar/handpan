@@ -27,7 +27,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 mod air;
-mod mathf;
+use puget_dsp::mathf;
 mod modular;
 mod note;
 mod preset;

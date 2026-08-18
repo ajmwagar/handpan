@@ -10,16 +10,17 @@ publish = false
 [features]
 default = ["std"]
 # Host builds (VSTi, tests, WAV rendering): use libstd math.
-std = []
+std = ["puget-dsp/std"]
 # Embedded / firmware builds: no_std + alloc, transcendentals via libm.
 # Enable with `--no-default-features --features libm`.
-libm = ["dep:libm"]
+libm = ["dep:libm", "puget-dsp/libm"]
 
 [dependencies]
-# The only optional dependency, pulled in solely for no_std firmware builds to
-# supply sin/cos/exp/pow. Host/plugin builds (default = std) stay dependency-free
-# so the shippable voice IP carries no third-party code.
+# libm supplies sin/cos/exp/pow on no_std firmware builds. Host/plugin builds
+# (default = std) stay free of third-party code so the shippable voice IP does.
 libm = { version = "0.2", optional = true }
+# Internal shared DSP foundation (math + generic ensemble); no third-party deps.
+puget-dsp = { path = "../puget-dsp", default-features = false }
 
 [[example]]
 name = "render_wav"

@@ -22,7 +22,8 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-mod mathf;
+use puget_dsp::mathf;
+use puget_dsp::Ensemble;
 mod resonator;
 
 use resonator::Resonator;
@@ -329,52 +330,41 @@ impl Mallet {
     }
 }
 
-/// Deterministic per-chair hash → [-1, 1] (stable spread, uncorrelated chairs).
-#[inline]
-fn chair_hash(i: u32) -> f32 {
-    let mut x = i.wrapping_mul(0x9E37_79B9) ^ 0x5F35_6495;
-    x ^= x >> 15;
-    x = x.wrapping_mul(0x85EB_CA6B);
-    x ^= x >> 13;
-    (x as f32 / u32::MAX as f32) * 2.0 - 1.0
-}
-
-/// 2^x = e^(x·ln2) — keeps the ensemble no_std/dependency-free.
-#[inline]
-fn exp2(x: f32) -> f32 {
-    mathf::exp(x * core::f32::consts::LN_2)
-}
-
-/// One player in the mallet section: a [`Mallet`] plus its humanization.
-struct Player {
+/// One player in a mallet section: a [`Mallet`] plus a per-player velocity
+/// spread. Mono-summed so the shared [`Ensemble`] can place it in the field.
+struct MalletVoice {
     mallet: Mallet,
-    detune_norm: f32,
-    detune_ratio: f32,
-    pan_norm: f32,
-    pan_l: f32,
-    pan_r: f32,
-    gain: f32,
-    vel_var: f32,
-    stagger: u32,
-    pend: Option<(f32, f32)>, // (freq, velocity) held until the strike lands
-    countdown: u32,
+    vel_scale: f32,
+}
+impl puget_dsp::Voice for MalletVoice {
+    type Event = f32; // strike velocity
+    fn humanize(&mut self, seed: u32) {
+        // Velocity spread (harder/softer players); tuning spread + flam
+        // decorrelate the rest, so no resonator re-seed is needed.
+        let h = ((seed & 0xffff) as f32 / 65_535.0) * 2.0 - 1.0;
+        self.vel_scale = 0.88 + 0.12 * h;
+    }
+    fn trigger(&mut self, freq: f32, velocity: f32) {
+        self.mallet.strike_hz(freq, (velocity * self.vel_scale).clamp(0.0, 1.0));
+    }
+    fn release(&mut self) {} // struck — rings down on its own
+    fn process(&mut self) -> f32 {
+        let (l, r) = self.mallet.process();
+        (l + r) * 0.5
+    }
 }
 
-/// A **mallet section**: several humanized players striking together — a whole
-/// row of marimbas/vibes/glocks rather than one. Because struck sounds are
-/// transient, the section feel comes from **timing flam** (bars don't land in
-/// perfect sync), velocity spread, tuning spread, and stereo placement. The
-/// `chairs` count is the "how many players" control; `set_spread` widens the
-/// tuning.
+/// A **mallet section**: humanized players striking together (the shared
+/// [`Ensemble`]). Struck sections get their feel from timing flam, velocity
+/// spread, tuning spread and stereo placement. The chair count is the "how many
+/// players" control; `set_spread`/`set_width` are the tuning/image macros.
 pub struct MalletEnsemble {
-    players: Vec<Player>,
-    chairs: usize,
-    spread_cents: f32,
+    section: Ensemble<MalletVoice>,
 }
 
 impl MalletEnsemble {
-    /// A section of up to `max_chairs` players (each with `poly` voices).
-    /// `spread_cents` is the tuning spread across the section (~5 is lush).
+    /// A section of up to `max_chairs` players (each with `poly` voices),
+    /// `spread_cents` tuning spread.
     pub fn new(
         fs: f32,
         instrument: Instrument,
@@ -382,124 +372,50 @@ impl MalletEnsemble {
         spread_cents: f32,
         poly: usize,
     ) -> Self {
-        let max = max_chairs.max(1);
-        let mut players = Vec::with_capacity(max);
-        for i in 0..max {
-            let (dnorm, pan, gvar, vv, stag) = if i == 0 {
-                (0.0, 0.0, 1.0, 1.0, 0)
-            } else {
-                let d = chair_hash(i as u32 * 4 + 1);
-                let p = chair_hash(i as u32 * 4 + 2);
-                let g = 0.85 + 0.15 * chair_hash(i as u32 * 4 + 3).abs();
-                let v = 0.88 + 0.12 * chair_hash(i as u32 * 4 + 3);
-                // Flam: strikes don't land together — up to ~25 ms of spread.
-                let s = (0.5 * (chair_hash(i as u32 * 4 + 4) + 1.0) * 0.025 * fs) as u32;
-                (d, p, g, v, s)
-            };
-            let theta = (pan + 1.0) * 0.25 * core::f32::consts::PI; // equal-power pan
-            players.push(Player {
-                mallet: Mallet::new(fs, instrument, poly.max(1)),
-                detune_norm: dnorm,
-                detune_ratio: exp2(dnorm * spread_cents / 1200.0),
-                pan_norm: pan,
-                pan_l: mathf::cos(theta),
-                pan_r: mathf::sin(theta),
-                gain: gvar,
-                vel_var: vv,
-                stagger: stag,
-                pend: None,
-                countdown: 0,
-            });
-        }
-        MalletEnsemble { players, chairs: 1, spread_cents }
+        // Flam: strikes don't land together — up to ~25 ms of onset spread.
+        let section = Ensemble::new(fs, max_chairs, spread_cents, 25.0, |_| MalletVoice {
+            mallet: Mallet::new(fs, instrument, poly.max(1)),
+            vel_scale: 1.0,
+        });
+        MalletEnsemble { section }
     }
 
-    /// How many players are sounding (the "chairs" encoder). Clamped `[1, max]`.
+    /// How many players are sounding (the "chairs" encoder), clamped `[1, max]`.
     pub fn set_chairs(&mut self, n: usize) {
-        self.chairs = n.clamp(1, self.players.len());
+        self.section.set_active(n);
     }
-
     /// Number of active chairs.
     pub fn chairs(&self) -> usize {
-        self.chairs
+        self.section.active()
     }
-
     /// Tuning spread across the section, in cents (intimate ↔ wide).
     pub fn set_spread(&mut self, cents: f32) {
-        self.spread_cents = cents.max(0.0);
-        for p in self.players.iter_mut() {
-            p.detune_ratio = exp2(p.detune_norm * self.spread_cents / 1200.0);
-        }
+        self.section.set_spread(cents);
     }
-
-    /// Stereo width of the section, 0..1 — collapses the players toward the
-    /// centre (0 = mono) or opens them to the full field (1). A macro control,
-    /// typically the expander's Width CV + attenuverter over an offset.
+    /// Stereo width, 0..1 (mono ↔ full field).
     pub fn set_width(&mut self, width: f32) {
-        let w = width.clamp(0.0, 1.0);
-        for p in self.players.iter_mut() {
-            let theta = (p.pan_norm * w + 1.0) * 0.25 * core::f32::consts::PI;
-            p.pan_l = mathf::cos(theta);
-            p.pan_r = mathf::sin(theta);
-        }
+        self.section.set_width(width);
     }
-
-    /// Strike a pitch (Hz) across the section (each chair detuned + flammed).
+    /// Strike a pitch (Hz) across the section.
     pub fn strike_hz(&mut self, freq: f32, velocity: f32) {
-        for p in self.players.iter_mut().take(self.chairs) {
-            let f = freq * p.detune_ratio;
-            let v = (velocity * p.vel_var).clamp(0.0, 1.0);
-            if p.stagger == 0 {
-                p.mallet.strike_hz(f, v);
-                p.pend = None;
-                p.countdown = 0;
-            } else {
-                p.pend = Some((f, v));
-                p.countdown = p.stagger;
-            }
-        }
+        self.section.trigger(freq, velocity);
     }
-
     /// Strike a MIDI note across the section.
     pub fn strike_midi(&mut self, note: f32, velocity: f32) {
         self.strike_hz(440.0 * mathf::powf(2.0, (note - 69.0) / 12.0), velocity);
     }
-
     /// Damping (0 = ring, 1 = fast mute), section-wide.
     pub fn set_damp(&mut self, amount: f32) {
-        for p in self.players.iter_mut() {
-            p.mallet.set_damp(amount);
-        }
+        self.section.for_each_voice(|v, _| v.mallet.set_damp(amount));
     }
-
-    /// Tremolo (rate Hz, depth), section-wide (phase stays desynced per player).
+    /// Tremolo (rate Hz, depth), section-wide.
     pub fn set_tremolo(&mut self, hz: f32, depth: f32) {
-        for p in self.players.iter_mut() {
-            p.mallet.set_tremolo(hz, depth);
-        }
+        self.section.for_each_voice(|v, _| v.mallet.set_tremolo(hz, depth));
     }
-
     /// One stereo sample of the whole section.
     #[inline]
     pub fn process(&mut self) -> (f32, f32) {
-        let (mut l, mut r) = (0.0, 0.0);
-        let makeup = 1.0 / mathf::sqrt(self.chairs as f32);
-        for p in self.players.iter_mut().take(self.chairs) {
-            if p.countdown > 0 {
-                p.countdown -= 1;
-                if p.countdown == 0 {
-                    if let Some((f, v)) = p.pend.take() {
-                        p.mallet.strike_hz(f, v);
-                    }
-                }
-            }
-            // Mono-sum the player then place it in the section's stereo field.
-            let (cl, cr) = p.mallet.process();
-            let s = (cl + cr) * 0.5 * p.gain * makeup;
-            l += s * p.pan_l;
-            r += s * p.pan_r;
-        }
-        (l, r)
+        self.section.process()
     }
 }
 
