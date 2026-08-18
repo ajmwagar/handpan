@@ -689,7 +689,8 @@ fn chair_hash(i: u32) -> f32 {
 /// gain, onset stagger).
 struct Chair {
     wind: Wind,
-    detune_ratio: f32, // frequency multiplier for this chair's tuning offset
+    detune_norm: f32,  // fixed per-chair tuning offset in [-1, 1]
+    detune_ratio: f32, // frequency multiplier = 2^(detune_norm·spread/1200)
     pan_l: f32,
     pan_r: f32,
     gain: f32,
@@ -709,6 +710,7 @@ struct Chair {
 pub struct WindEnsemble {
     voices: Vec<Chair>,
     chairs: usize,
+    spread_cents: f32,
 }
 
 impl WindEnsemble {
@@ -721,10 +723,10 @@ impl WindEnsemble {
             let mut wind = Wind::new(fs, kind);
             wind.humanize(0x51ED_2A17 ^ (i as u32).wrapping_mul(0x9E37_79B9));
             // Chair 0 is the "principal": on pitch, centred. Others spread.
-            let (detune, pan, gvar, vib, stag) = if i == 0 {
+            let (dnorm, pan, gvar, vib, stag) = if i == 0 {
                 (0.0, 0.0, 1.0, 1.0, 0)
             } else {
-                let d = spread_cents * chair_hash(i as u32 * 4 + 1);
+                let d = chair_hash(i as u32 * 4 + 1);
                 let p = chair_hash(i as u32 * 4 + 2);
                 let g = 0.88 + 0.12 * chair_hash(i as u32 * 4 + 3).abs();
                 let v = 0.90 + 0.20 * ((chair_hash(i as u32 * 4 + 3) + 1.0) * 0.5);
@@ -734,7 +736,8 @@ impl WindEnsemble {
             let theta = (pan + 1.0) * 0.25 * core::f32::consts::PI; // equal-power pan
             voices.push(Chair {
                 wind,
-                detune_ratio: exp2(detune / 1200.0),
+                detune_norm: dnorm,
+                detune_ratio: exp2(dnorm * spread_cents / 1200.0),
                 pan_l: mathf::cos(theta),
                 pan_r: mathf::sin(theta),
                 gain: gvar,
@@ -744,7 +747,17 @@ impl WindEnsemble {
                 countdown: 0,
             });
         }
-        WindEnsemble { voices, chairs: 1 }
+        WindEnsemble { voices, chairs: 1, spread_cents }
+    }
+
+    /// Detune spread across the section, in cents — the "intimate consort ↔ wide
+    /// orchestra" knob. 0 = pure unison (still lush from desynced vibrato/air);
+    /// ~7 = a rich section. Takes effect on the next `note_on`.
+    pub fn set_spread(&mut self, cents: f32) {
+        self.spread_cents = cents.max(0.0);
+        for c in self.voices.iter_mut() {
+            c.detune_ratio = exp2(c.detune_norm * self.spread_cents / 1200.0);
+        }
     }
 
     /// How many players are sounding (the "chairs" encoder). Clamped to

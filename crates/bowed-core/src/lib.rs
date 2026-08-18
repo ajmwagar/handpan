@@ -638,6 +638,7 @@ fn exp2(x: f32) -> f32 {
 /// plus its fixed humanization (intonation, pan, gain, bow stagger).
 struct Desk {
     voice: Bowed,
+    detune_norm: f32,
     detune_ratio: f32,
     pan_l: f32,
     pan_r: f32,
@@ -657,6 +658,7 @@ struct Desk {
 pub struct BowedEnsemble {
     players: Vec<Desk>,
     desks: usize,
+    spread_cents: f32,
 }
 
 impl BowedEnsemble {
@@ -669,10 +671,10 @@ impl BowedEnsemble {
             let mut voice = Bowed::new(fs, kind);
             voice.humanize(0x51ED_2A17 ^ (i as u32).wrapping_mul(0x9E37_79B9));
             // Desk 0 is the leader: on pitch, centred. Others spread out.
-            let (detune, pan, gvar, vib, stag) = if i == 0 {
+            let (dnorm, pan, gvar, vib, stag) = if i == 0 {
                 (0.0, 0.0, 1.0, 1.0, 0)
             } else {
-                let d = spread_cents * chair_hash(i as u32 * 4 + 1);
+                let d = chair_hash(i as u32 * 4 + 1);
                 let p = chair_hash(i as u32 * 4 + 2);
                 let g = 0.85 + 0.15 * chair_hash(i as u32 * 4 + 3).abs();
                 let v = 0.85 + 0.30 * ((chair_hash(i as u32 * 4 + 3) + 1.0) * 0.5);
@@ -683,7 +685,8 @@ impl BowedEnsemble {
             let theta = (pan + 1.0) * 0.25 * core::f32::consts::PI; // equal-power pan
             players.push(Desk {
                 voice,
-                detune_ratio: exp2(detune / 1200.0),
+                detune_norm: dnorm,
+                detune_ratio: exp2(dnorm * spread_cents / 1200.0),
                 pan_l: mathf::cos(theta),
                 pan_r: mathf::sin(theta),
                 gain: gvar,
@@ -694,7 +697,17 @@ impl BowedEnsemble {
                 is_pluck: false,
             });
         }
-        BowedEnsemble { players, desks: 1 }
+        BowedEnsemble { players, desks: 1, spread_cents }
+    }
+
+    /// Intonation spread across the section, in cents — the "intimate consort ↔
+    /// wide orchestra" knob. 0 = pure unison (still shimmering from desynced
+    /// vibrato/bows); ~6 = a rich section. Takes effect on the next `note_on`.
+    pub fn set_spread(&mut self, cents: f32) {
+        self.spread_cents = cents.max(0.0);
+        for d in self.players.iter_mut() {
+            d.detune_ratio = exp2(d.detune_norm * self.spread_cents / 1200.0);
+        }
     }
 
     /// How many players are sounding (the "desks" encoder). Clamped to `[1, max]`.
