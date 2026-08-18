@@ -1,0 +1,20 @@
+[package]
+name = "wind-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Avery Wagar"]
+description = "Wind physical modeling (clarinet/flute/saxophone/brass) — waveguide air column + nonlinear reed/jet/lip exciter"
+license-file = "../../LICENSE"
+publish = false
+
+[features]
+default = ["std"]
+std = []
+libm = ["dep:libm"]
+
+[dependencies]
+libm = { version = "0.2", optional = true }
+
+[[example]]
+name = "render_winds"
+required-features = ["std"]
