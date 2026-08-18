@@ -25,3 +25,6 @@ target
 
 # Third-party analysis recordings (not ours to redistribute)
 /data/
+
+# Claude Code local state (settings, agent worktrees)
+.claude/
