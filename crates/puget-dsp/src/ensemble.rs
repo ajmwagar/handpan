@@ -23,6 +23,11 @@ pub trait Voice {
     fn release(&mut self);
     /// One mono sample.
     fn process(&mut self) -> f32;
+    /// Optional instrument-level tuning offset in cents. For voices whose spread
+    /// is a whole-instrument detune rather than a per-note frequency multiplier
+    /// (e.g. a struck, fixed-tuned body like the handpan). Default: no-op —
+    /// frequency-triggered voices detune via the per-note ratio instead.
+    fn set_detune(&mut self, _cents: f32) {}
 }
 
 /// Deterministic per-player hash → [-1, 1] (stable spread, uncorrelated players).
@@ -95,6 +100,9 @@ impl<V: Voice> Ensemble<V> {
                 let s = (0.5 * (hash(i as u32 * 4 + 4) + 1.0) * (stagger_ms * 0.001) * fs) as u32;
                 (d, p, g, m, s)
             };
+            // Instrument-detuned voices (handpan) get their spread here; freq-
+            // triggered voices leave this a no-op and use the ratio below.
+            voice.set_detune(dnorm * spread_cents);
             let (pl, pr) = pan_gains(pan);
             players.push(Player {
                 voice,
@@ -133,6 +141,7 @@ impl<V: Voice> Ensemble<V> {
         self.spread_cents = cents.max(0.0);
         for p in &mut self.players {
             p.detune_ratio = mathf::exp2(p.detune_norm * self.spread_cents / 1200.0);
+            p.voice.set_detune(p.detune_norm * self.spread_cents);
         }
     }
 

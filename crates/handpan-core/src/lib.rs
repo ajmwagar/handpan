@@ -28,6 +28,7 @@ use alloc::vec::Vec;
 
 mod air;
 use puget_dsp::mathf;
+use puget_dsp::{Ensemble, Voice};
 mod modular;
 mod note;
 mod preset;
@@ -70,6 +71,7 @@ pub struct Handpan {
     shell_out_a: f32,
     air: Air,
     air_wet: f32,
+    detune_mult: f32,
 }
 
 impl Handpan {
@@ -136,6 +138,18 @@ impl Handpan {
             shell_out_a: 1.0 - mathf::exp(-core::f32::consts::TAU * 2500.0 / fs),
             air: Air::new(fs),
             air_wet: profile.air,
+            detune_mult: 1.0,
+        }
+    }
+
+    /// Global tuning offset in cents (section detune, A=432, live pitch shift).
+    /// Retunes every field's partials; cheap enough for control-rate use.
+    pub fn set_detune(&mut self, cents: f32) {
+        let target = mathf::powf(2.0, cents / 1200.0);
+        let rel = target / self.detune_mult;
+        self.detune_mult = target;
+        for note in &mut self.notes {
+            note.retune(rel);
         }
     }
 
@@ -293,9 +307,144 @@ fn harmonic_relatedness(a: f32, b: f32) -> f32 {
     w.clamp(0.15, 1.0)
 }
 
+/// A section note: which tone field to strike, and how hard.
+#[derive(Clone, Copy)]
+pub struct HandStrike {
+    pub index: usize,
+    pub velocity: f32,
+}
+
+/// One player in a handpan section: a whole [`Handpan`], mono-summed so the
+/// shared [`Ensemble`] can place it in the field. Spread arrives as a
+/// whole-instrument detune (via [`Handpan::set_detune`]), which is why the
+/// handpan needed the `Voice::set_detune` hook.
+struct HandVoice {
+    pan: Handpan,
+}
+impl Voice for HandVoice {
+    type Event = HandStrike;
+    fn humanize(&mut self, _seed: u32) {} // per-chair seed is baked at build
+    fn trigger(&mut self, _freq: f32, ev: HandStrike) {
+        self.pan.strike(ev.index, ev.velocity);
+    }
+    fn release(&mut self) {} // struck — rings down on its own
+    fn set_detune(&mut self, cents: f32) {
+        self.pan.set_detune(cents);
+    }
+    fn process(&mut self) -> f32 {
+        let (l, r) = self.pan.process();
+        (l + r) * 0.5
+    }
+}
+
+/// A **handpan section** ("choir"): humanized [`Handpan`]s stacked and spread
+/// across the stereo field (the shared [`Ensemble`]) — a single struck note
+/// becomes a whole shimmering wash. The chair count is the "how many players"
+/// control; `set_spread` (a whole-instrument detune per chair) and `set_width`
+/// are the tuning/image macros. Each chair is seeded differently so its
+/// per-field micro-detuning differs, and detuned as a whole by the spread.
+pub struct HandpanEnsemble {
+    section: Ensemble<HandVoice>,
+    fields: usize,
+}
+
+impl HandpanEnsemble {
+    /// A choir of up to `max_chairs` handpans on `scale`×`build`×`size`,
+    /// `spread_cents` tuning spread.
+    pub fn new(
+        fs: f32,
+        scale: &Scale,
+        build: Build,
+        size: Size,
+        max_chairs: usize,
+        spread_cents: f32,
+    ) -> Self {
+        let freqs = scale.freqs();
+        let fields = freqs.len();
+        // Up to ~12 ms of onset stagger (fingers, not perfectly synced).
+        let section = Ensemble::new(fs, max_chairs, spread_cents, 12.0, |i| {
+            let mut profile = VoiceProfile::preset(build, size);
+            profile.seed ^= (i as u32).wrapping_mul(0x9E37_79B9) | 1;
+            HandVoice { pan: Handpan::with_profile(fs, &freqs, &profile) }
+        });
+        HandpanEnsemble { section, fields }
+    }
+
+    /// Number of tone fields (valid strike indices are `0..fields`).
+    pub fn note_count(&self) -> usize {
+        self.fields
+    }
+
+    /// How many players are sounding (the "chairs" encoder), clamped `[1, max]`.
+    pub fn set_chairs(&mut self, n: usize) {
+        self.section.set_active(n);
+    }
+    /// Number of active chairs.
+    pub fn chairs(&self) -> usize {
+        self.section.active()
+    }
+    /// Detune spread across the section, in cents (intimate ↔ wide).
+    pub fn set_spread(&mut self, cents: f32) {
+        self.section.set_spread(cents);
+    }
+    /// Stereo width, 0..1 (mono ↔ full field).
+    pub fn set_width(&mut self, width: f32) {
+        self.section.set_width(width);
+    }
+    /// Strike tone field `index` across the whole section.
+    pub fn strike(&mut self, index: usize, velocity: f32) {
+        self.section.trigger(0.0, HandStrike { index, velocity });
+    }
+    /// Room-ambience ("Air") wet level, section-wide.
+    pub fn set_air(&mut self, wet: f32) {
+        self.section.for_each_voice(|v, _| v.pan.set_air(wet));
+    }
+    /// Palm-mute / damping, section-wide.
+    pub fn set_damp(&mut self, amount: f32) {
+        self.section.for_each_voice(|v, _| v.pan.set_damp(amount));
+    }
+    /// Sympathetic coupling, section-wide.
+    pub fn set_coupling(&mut self, amount: f32) {
+        self.section.for_each_voice(|v, _| v.pan.set_coupling(amount));
+    }
+    /// One stereo sample of the whole section.
+    #[inline]
+    pub fn process(&mut self) -> (f32, f32) {
+        self.section.process()
+    }
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handpan_choir_stacks_and_is_stereo() {
+        let fs = 48_000.0;
+        let mut choir =
+            HandpanEnsemble::new(fs, &Scale::DKurd9, Build::Handpan, Size::Standard, 8, 6.0);
+        choir.set_chairs(6);
+        assert_eq!(choir.chairs(), 6);
+        choir.set_spread(6.0); // whole-instrument detune per chair (live)
+        let n = choir.note_count();
+        assert!(n > 0);
+        // Strike a little rolling phrase across the fields.
+        let (mut pl, mut pr, mut width) = (0.0f32, 0.0f32, 0.0f32);
+        for k in 0..n {
+            choir.strike(k % n, 0.9);
+            for i in 0..8_000 {
+                let (l, r) = choir.process();
+                assert!(l.is_finite() && r.is_finite(), "non-finite");
+                if i < 4_000 {
+                    pl = pl.max(l.abs());
+                    pr = pr.max(r.abs());
+                    width = width.max((l - r).abs());
+                }
+            }
+        }
+        assert!(pl > 0.01 && pr > 0.01, "choir silent: {pl} {pr}");
+        assert!(width > 0.005, "choir not spread/stereo: {width}");
+    }
 
     #[test]
     fn strike_is_stable_and_decays() {

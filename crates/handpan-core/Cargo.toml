@@ -25,3 +25,7 @@ puget-dsp = { path = "../puget-dsp", default-features = false }
 [[example]]
 name = "render_wav"
 required-features = ["std"]
+
+[[example]]
+name = "render_choir"
+required-features = ["std"]

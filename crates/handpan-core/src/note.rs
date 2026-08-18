@@ -210,6 +210,15 @@ impl NoteVoice {
         self.damping = true;
     }
 
+    /// Scale every partial by a relative frequency multiplier and re-set its
+    /// resonator — a whole-field tuning shift (section detune, A=432, …).
+    pub fn retune(&mut self, rel: f32) {
+        for m in &mut self.modes {
+            m.base_freq *= rel;
+            m.res.set(m.base_freq, m.t60, m.gain, self.fs);
+        }
+    }
+
     /// Continuous palm-mute pressure: `factor` is a per-sample bleed (1.0 =
     /// open, <1 damps). Set from a pressure CV or aftertouch.
     pub fn set_pressure(&mut self, factor: f32) {
