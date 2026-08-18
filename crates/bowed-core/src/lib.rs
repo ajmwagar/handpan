@@ -640,6 +640,7 @@ struct Desk {
     voice: Bowed,
     detune_norm: f32,
     detune_ratio: f32,
+    pan_norm: f32,
     pan_l: f32,
     pan_r: f32,
     gain: f32,
@@ -687,6 +688,7 @@ impl BowedEnsemble {
                 voice,
                 detune_norm: dnorm,
                 detune_ratio: exp2(dnorm * spread_cents / 1200.0),
+                pan_norm: pan,
                 pan_l: mathf::cos(theta),
                 pan_r: mathf::sin(theta),
                 gain: gvar,
@@ -707,6 +709,18 @@ impl BowedEnsemble {
         self.spread_cents = cents.max(0.0);
         for d in self.players.iter_mut() {
             d.detune_ratio = exp2(d.detune_norm * self.spread_cents / 1200.0);
+        }
+    }
+
+    /// Stereo width of the section, 0..1 — collapses the desks toward the centre
+    /// (0 = mono) or opens them to the full field (1). A macro control, typically
+    /// the expander's Width CV + attenuverter over an offset.
+    pub fn set_width(&mut self, width: f32) {
+        let w = width.clamp(0.0, 1.0);
+        for d in self.players.iter_mut() {
+            let theta = (d.pan_norm * w + 1.0) * 0.25 * core::f32::consts::PI;
+            d.pan_l = mathf::cos(theta);
+            d.pan_r = mathf::sin(theta);
         }
     }
 

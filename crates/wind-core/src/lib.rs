@@ -691,6 +691,7 @@ struct Chair {
     wind: Wind,
     detune_norm: f32,  // fixed per-chair tuning offset in [-1, 1]
     detune_ratio: f32, // frequency multiplier = 2^(detune_norm·spread/1200)
+    pan_norm: f32,     // fixed per-chair pan position in [-1, 1]
     pan_l: f32,
     pan_r: f32,
     gain: f32,
@@ -738,6 +739,7 @@ impl WindEnsemble {
                 wind,
                 detune_norm: dnorm,
                 detune_ratio: exp2(dnorm * spread_cents / 1200.0),
+                pan_norm: pan,
                 pan_l: mathf::cos(theta),
                 pan_r: mathf::sin(theta),
                 gain: gvar,
@@ -757,6 +759,18 @@ impl WindEnsemble {
         self.spread_cents = cents.max(0.0);
         for c in self.voices.iter_mut() {
             c.detune_ratio = exp2(c.detune_norm * self.spread_cents / 1200.0);
+        }
+    }
+
+    /// Stereo width of the section, 0..1 — collapses the chairs toward the
+    /// centre (0 = mono) or opens them to the full field (1). A macro control,
+    /// typically the expander's Width CV + attenuverter over an offset.
+    pub fn set_width(&mut self, width: f32) {
+        let w = width.clamp(0.0, 1.0);
+        for c in self.voices.iter_mut() {
+            let theta = (c.pan_norm * w + 1.0) * 0.25 * core::f32::consts::PI;
+            c.pan_l = mathf::cos(theta);
+            c.pan_r = mathf::sin(theta);
         }
     }
 
@@ -1026,6 +1040,15 @@ mod tests {
         assert!(pl > 0.02 && pr > 0.02, "section silent: {pl} {pr}");
         // Humanized chairs decorrelate → a genuine stereo image (L != R).
         assert!(width > 0.01, "section not stereo/spread: width {width}");
+
+        // set_width(0) collapses the pan toward centre (narrower L/R difference).
+        sec.set_width(0.0);
+        let mut narrow = 0.0f32;
+        for _ in 0..fs as usize {
+            let (l, r) = sec.process();
+            narrow = narrow.max((l - r).abs());
+        }
+        assert!(narrow < width, "width=0 should narrow the image: {narrow} vs {width}");
         sec.note_off();
         for _ in 0..fs as usize {
             sec.process();
