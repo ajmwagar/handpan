@@ -4,7 +4,7 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
-use bowed_core::{Bowed, StringKind};
+use bowed_core::{Bowed, BowedInstrument, StringKind};
 
 const FS: f32 = 48_000.0;
 
@@ -122,6 +122,54 @@ fn main() -> std::io::Result<()> {
             left[base + j] += s * 0.7;
             right[base + j] += s * 0.72;
         }
+    }
+
+    // --- Polyphony: double stops + string crossing on the shared body ------
+    {
+        let base = left.len();
+        let nn = (10.0 * FS) as usize;
+        left.resize(base + nn, 0.0);
+        right.resize(base + nn, 0.0);
+        let mut v = BowedInstrument::new(FS, StringKind::Violin);
+        v.set_vibrato(5.5, 0.02);
+        v.set_brightness(0.6);
+        let mut t = 0usize;
+        let render = |v: &mut BowedInstrument, secs: f32, buf: (&mut Vec<f32>, &mut Vec<f32>), at: usize| {
+            let n = (secs * FS) as usize;
+            for j in 0..n {
+                let s = v.process();
+                let idx = at + j;
+                if idx < buf.0.len() {
+                    buf.0[idx] += s * 0.7;
+                    buf.1[idx] += s * 0.72;
+                }
+            }
+            n
+        };
+        // Double stop: open D + open A (a ringing perfect fifth), held.
+        v.note_on(293.66, 0.7, 0.5);
+        v.note_on(440.0, 0.7, 0.5);
+        t += render(&mut v, 2.2, (&mut left, &mut right), base + t);
+        v.note_off_all();
+        t += render(&mut v, 0.5, (&mut left, &mut right), base + t);
+
+        // Double stop moving in parallel sixths over the ringing G drone.
+        v.note_on(196.0, 0.55, 0.45); // open G drone (bottom string)
+        for &(top, _) in &[(392.0, 0), (440.0, 0), (493.88, 0), (440.0, 0), (392.0, 0)] {
+            v.note_on(top, 0.7, 0.5); // melody on an upper string, G keeps ringing
+            t += render(&mut v, 0.55, (&mut left, &mut right), base + t);
+        }
+        v.note_off_all();
+        t += render(&mut v, 0.6, (&mut left, &mut right), base + t);
+
+        // String crossing (bariolage): rapid alternation across strings.
+        let cross = [293.66, 440.0, 659.25, 440.0, 293.66, 196.0, 293.66, 440.0];
+        for &f in cross.iter().cycle().take(cross.len() * 2) {
+            v.note_on(f, 0.75, 0.55);
+            t += render(&mut v, 0.18, (&mut left, &mut right), base + t);
+        }
+        v.note_off_all();
+        let _ = render(&mut v, 1.5, (&mut left, &mut right), base + t);
     }
 
     let peak = left

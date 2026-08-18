@@ -7,6 +7,22 @@
 //! interaction (McIntyre–Woodhouse–Schumacher / Smith–STK). It reuses the same
 //! `no_std`, dependency-free discipline and drops into the same front-ends.
 //!
+//! Two front-doors:
+//!
+//! * [`Bowed`] — a single string. Bow it ([`Bowed::note_on`]) or pluck it
+//!   ([`Bowed::pluck`]).
+//! * [`BowedInstrument`] — a whole instrument: four strings tuned to the real
+//!   open strings, sharing **one** resonant [`Body`]. Bow two at once for a
+//!   **double stop**, or hop between them for **string crossing** — all coloured
+//!   by the same body, exactly as a real instrument is.
+//!
+//! The body is a **modal bank** (a dozen resonators tuned to measured
+//! violin/cello body resonances — the A0 air mode, the B1± main-wood modes, the
+//! bridge hill) rather than a couple of formant filters. That reconstructs the
+//! body's impulse response as a sum of modes: the same thing a convolution with
+//! a measured body IR does, but as cheap IIR filters that stay real-time and
+//! firmware-friendly.
+//!
 //! ```
 //! use bowed_core::{Bowed, StringKind};
 //! let mut v = Bowed::new(48_000.0, StringKind::Violin);
@@ -84,40 +100,32 @@ impl OnePole {
     }
 }
 
-/// RBJ band-pass biquad (0 dB peak) — a violin-body formant.
+/// A single body mode: an impulse-normalized 2-pole resonator (one term of the
+/// body's modal impulse response). `set` from (freq, Q, gain).
 #[derive(Default)]
-struct Biquad {
-    b0: f32,
-    b1: f32,
-    b2: f32,
+struct Reso {
     a1: f32,
     a2: f32,
-    x1: f32,
-    x2: f32,
+    g: f32,
     y1: f32,
     y2: f32,
 }
-impl Biquad {
-    fn bandpass(freq: f32, q: f32, fs: f32) -> Self {
-        let w0 = core::f32::consts::TAU * freq / fs;
-        let (s, c) = (mathf::sin(w0), mathf::cos(w0));
-        let alpha = s / (2.0 * q);
-        let a0 = 1.0 + alpha;
-        Biquad {
-            b0: alpha / a0,
-            b1: 0.0,
-            b2: -alpha / a0,
-            a1: -2.0 * c / a0,
-            a2: (1.0 - alpha) / a0,
-            ..Default::default()
+impl Reso {
+    fn new(freq: f32, q: f32, gain: f32, fs: f32) -> Self {
+        let w = core::f32::consts::TAU * freq / fs;
+        // Pole radius from Q (bandwidth = f/Q).
+        let r = mathf::exp(-core::f32::consts::PI * freq / (q * fs));
+        Reso {
+            a1: 2.0 * r * mathf::cos(w),
+            a2: -(r * r),
+            g: gain * mathf::sin(w), // impulse normalization
+            y1: 0.0,
+            y2: 0.0,
         }
     }
     #[inline]
     fn tick(&mut self, x: f32) -> f32 {
-        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2 - self.a1 * self.y1
-            - self.a2 * self.y2;
-        self.x2 = self.x1;
-        self.x1 = x;
+        let y = self.g * x + self.a1 * self.y1 + self.a2 * self.y2;
         self.y2 = self.y1;
         self.y1 = y;
         y
@@ -145,27 +153,96 @@ pub enum StringKind {
     Bass,
 }
 
-struct BodyDef {
-    formants: [(f32, f32); 3], // (freq, Q)
-    pole: f32,                 // string loss pole (lower = brighter)
-    bow_pos: f32,              // 0..0.5 along the string
-}
-
-fn body_def(kind: StringKind) -> BodyDef {
-    match kind {
-        StringKind::Violin => BodyDef { formants: [(300.0, 2.0), (460.0, 3.0), (700.0, 3.5)], pole: 0.55, bow_pos: 0.13 },
-        StringKind::Viola => BodyDef { formants: [(220.0, 2.0), (350.0, 3.0), (600.0, 3.5)], pole: 0.58, bow_pos: 0.12 },
-        StringKind::Cello => BodyDef { formants: [(180.0, 2.0), (250.0, 3.0), (450.0, 3.5)], pole: 0.62, bow_pos: 0.11 },
-        StringKind::Bass => BodyDef { formants: [(70.0, 2.0), (100.0, 3.0), (180.0, 3.5)], pole: 0.66, bow_pos: 0.10 },
+impl StringKind {
+    /// The four open-string frequencies (Hz), low to high.
+    pub fn open_strings(self) -> [f32; 4] {
+        match self {
+            // G3 D4 A4 E5
+            StringKind::Violin => [196.00, 293.66, 440.00, 659.25],
+            // C3 G3 D4 A4
+            StringKind::Viola => [130.81, 196.00, 293.66, 440.00],
+            // C2 G2 D3 A3
+            StringKind::Cello => [65.41, 98.00, 146.83, 220.00],
+            // E1 A1 D2 G2
+            StringKind::Bass => [41.20, 55.00, 73.42, 98.00],
+        }
+    }
+    /// String loss pole (higher = darker) and default bow position.
+    fn string_def(self) -> (f32, f32) {
+        match self {
+            StringKind::Violin => (0.55, 0.13),
+            StringKind::Viola => (0.58, 0.12),
+            StringKind::Cello => (0.62, 0.11),
+            StringKind::Bass => (0.66, 0.10),
+        }
+    }
+    /// Frequency scale applied to the violin body-mode template.
+    fn body_scale(self) -> f32 {
+        match self {
+            StringKind::Violin => 1.0,
+            StringKind::Viola => 0.80,
+            StringKind::Cello => 0.52,
+            StringKind::Bass => 0.36,
+        }
     }
 }
 
-pub struct Bowed {
+/// The resonant body: a modal bank tuned to measured violin body resonances
+/// (scaled per instrument). Shared by all strings of a [`BowedInstrument`].
+///
+/// Template modes (violin, Hz): the A0 air resonance, the A1/B1± air-and-wood
+/// cluster around 400–550, wood modes to ~1.1 kHz, and the broad bridge hill
+/// around 1.7–3.5 kHz — the fixed formant peaks a long-term-average spectrum of
+/// real violin recordings shows.
+pub struct Body {
+    modes: Vec<Reso>,
+    dry: f32,
+    wet: f32,
+    makeup: f32,
+}
+impl Body {
+    fn new(kind: StringKind, fs: f32) -> Self {
+        // (freq, Q, gain) for the violin; scaled in frequency per instrument.
+        const TPL: &[(f32, f32, f32)] = &[
+            (280.0, 14.0, 0.55), // A0 air
+            (460.0, 22.0, 0.85), // B1-
+            (530.0, 22.0, 1.00), // B1+ main wood (strongest)
+            (700.0, 18.0, 0.50),
+            (820.0, 16.0, 0.65), // wood (seen in LTAS)
+            (1100.0, 12.0, 0.40),
+            (1400.0, 9.0, 0.38),
+            (1750.0, 7.0, 0.45), // lower bridge hill (seen in LTAS)
+            (2500.0, 4.0, 0.55), // broad bridge hill
+            (3500.0, 5.0, 0.28),
+        ];
+        let scale = kind.body_scale();
+        let nyq = fs * 0.45;
+        let mut modes = Vec::with_capacity(TPL.len());
+        for &(f, q, g) in TPL {
+            let freq = f * scale;
+            if freq < nyq {
+                modes.push(Reso::new(freq, q, g, fs));
+            }
+        }
+        Body { modes, dry: 0.55, wet: 0.11, makeup: 3.4 }
+    }
+    #[inline]
+    fn tick(&mut self, x: f32) -> f32 {
+        let mut s = 0.0;
+        for m in &mut self.modes {
+            s += m.tick(x);
+        }
+        (x * self.dry + s * self.wet) * self.makeup
+    }
+}
+
+/// A single bowed (or plucked) string — the waveguide + nonlinear bow, without
+/// a body. `tick_raw` returns the bridge signal, which a [`Body`] then colours.
+struct BowString {
     fs: f32,
     neck: Delay,
     bridge: Delay,
     string_filter: OnePole,
-    body: [Biquad; 3],
     bow_pos: f32,
     base_delay: f32,
     // Bow control (slewed so attacks/releases aren't clicks).
@@ -186,21 +263,16 @@ pub struct Bowed {
     pluck_amp: f32,
 }
 
-impl Bowed {
-    pub fn new(fs: f32, kind: StringKind) -> Self {
-        let d = body_def(kind);
+impl BowString {
+    fn new(fs: f32, kind: StringKind, seed: u32) -> Self {
+        let (pole, bow_pos) = kind.string_def();
         let max = (fs / 40.0) as usize + 4; // lowest ~40 Hz
-        Bowed {
+        BowString {
             fs,
             neck: Delay::new(max),
             bridge: Delay::new(max),
-            string_filter: OnePole::new(d.pole, 0.95),
-            body: [
-                Biquad::bandpass(d.formants[0].0, d.formants[0].1, fs),
-                Biquad::bandpass(d.formants[1].0, d.formants[1].1, fs),
-                Biquad::bandpass(d.formants[2].0, d.formants[2].1, fs),
-            ],
-            bow_pos: d.bow_pos,
+            string_filter: OnePole::new(pole, 0.95),
+            bow_pos,
             base_delay: 100.0,
             max_vel_target: 0.0,
             vel_env: 0.0,
@@ -208,7 +280,7 @@ impl Bowed {
             vib_phase: 0.0,
             vib_rate: 5.5,
             vib_depth: 0.0,
-            rng: 0x1234_5678 ^ (kind as u32).wrapping_mul(0x9E37_79B9),
+            rng: 0x1234_5678 ^ seed.wrapping_mul(0x9E37_79B9),
             noise_lp: 0.0,
             noise_amt: 0.12,
             attack: 0,
@@ -218,16 +290,14 @@ impl Bowed {
     }
 
     fn set_freq(&mut self, freq: f32) {
-        // Loop length must account for the extra sample of phase delay from the
-        // loss filter and the `last_out()` cache, otherwise the pitch runs flat.
-        // Empirically ~3.2 samples of excess round-trip delay.
+        // Loop length accounts for the loss filter + last_out() cache phase
+        // delay (~3.2 samples) so the pitch doesn't run flat.
         self.base_delay = (self.fs / freq - 3.2).max(4.0);
         self.retune(0.0);
     }
 
     #[inline]
     fn white(&mut self) -> f32 {
-        // xorshift32 → [-1, 1)
         self.rng ^= self.rng << 13;
         self.rng ^= self.rng >> 17;
         self.rng ^= self.rng << 5;
@@ -241,63 +311,54 @@ impl Bowed {
         self.neck.set_delay(d * (1.0 - self.bow_pos));
     }
 
-    /// Start a note: `freq` Hz, `bow_velocity` and `bow_pressure` in [0, 1].
-    pub fn note_on(&mut self, freq: f32, bow_velocity: f32, bow_pressure: f32) {
+    fn note_on(&mut self, freq: f32, bow_velocity: f32, bow_pressure: f32) {
         self.set_freq(freq);
         self.set_bow(bow_velocity, bow_pressure);
-        // A short burst of extra friction noise as the bow catches the string.
-        self.attack = (0.03 * self.fs) as u32; // ~30 ms of onset scratch
+        self.attack = (0.03 * self.fs) as u32; // ~30 ms onset scratch
     }
 
-    /// Lift the bow — the string rings down.
-    pub fn note_off(&mut self) {
+    fn note_off(&mut self) {
         self.max_vel_target = 0.0;
     }
 
-    /// Pizzicato: pluck the string instead of bowing it. `velocity` in [0, 1].
-    /// The bow is lifted; the string is excited by a short noise burst injected
-    /// into the waveguide, then rings down through the body like a plucked note.
-    pub fn pluck(&mut self, freq: f32, velocity: f32) {
+    fn pluck(&mut self, freq: f32, velocity: f32) {
         self.set_freq(freq);
         self.max_vel_target = 0.0;
         self.vel_env = 0.0;
-        self.pluck_rem = (0.004 * self.fs) as u32; // ~4 ms excitation
+        self.pluck_rem = (0.004 * self.fs) as u32;
         self.pluck_amp = 0.6 * velocity.clamp(0.0, 1.0);
     }
 
-    /// Continuous bow control (during a note): speed and pressure in [0, 1].
-    pub fn set_bow(&mut self, bow_velocity: f32, bow_pressure: f32) {
+    fn set_bow(&mut self, bow_velocity: f32, bow_pressure: f32) {
         self.max_vel_target = 0.03 + 0.22 * bow_velocity.clamp(0.0, 1.0);
         self.slope = 1.0 + 4.0 * bow_pressure.clamp(0.0, 1.0);
     }
 
-    /// Bow position along the string: 0 = sul tasto (over the fingerboard,
-    /// mellow), 1 = sul ponticello (near the bridge, glassy/bright).
-    pub fn set_bow_position(&mut self, pos: f32) {
-        // Map [0,1] onto a musical range of the fractional string position.
+    fn set_bow_position(&mut self, pos: f32) {
         self.bow_pos = (0.06 + 0.14 * pos.clamp(0.0, 1.0)).clamp(0.02, 0.5);
         self.retune(0.0);
     }
 
-    /// Timbral brightness: string loss-filter pole. 0 = dark/damped,
-    /// 1 = bright/singing. (Also scales bow-friction noise a touch.)
-    pub fn set_brightness(&mut self, amount: f32) {
+    fn set_brightness(&mut self, amount: f32) {
         let a = amount.clamp(0.0, 1.0);
-        // Higher brightness → less high-frequency loss (lower pole).
         self.string_filter.pole = 0.72 - 0.30 * a;
         self.noise_amt = 0.06 + 0.14 * a;
     }
 
-    /// Vibrato: rate (Hz) and depth (fraction of a semitone-ish).
-    pub fn set_vibrato(&mut self, rate_hz: f32, depth: f32) {
+    fn set_vibrato(&mut self, rate_hz: f32, depth: f32) {
         self.vib_rate = rate_hz.max(0.0);
         self.vib_depth = depth.clamp(0.0, 0.05);
     }
 
-    /// One mono sample.
+    /// Is this string still producing meaningful energy?
     #[inline]
-    pub fn process(&mut self) -> f32 {
-        // Slew the bow velocity (≈8 ms) so on/off isn't a click.
+    fn active(&self) -> bool {
+        self.max_vel_target > 0.0 || self.vel_env > 1e-4 || self.pluck_rem > 0
+    }
+
+    /// One sample of the raw bridge signal (pre-body).
+    #[inline]
+    fn tick_raw(&mut self) -> f32 {
         self.vel_env += 0.0025 * (self.max_vel_target - self.vel_env);
 
         if self.vib_depth > 0.0 {
@@ -316,18 +377,12 @@ impl Bowed {
             let nut_refl = -self.neck.last_out();
             self.neck.tick(bridge_refl + exc);
             self.bridge.tick(nut_refl + exc);
-            let raw = self.bridge.last_out();
-            let mut b = 0.0;
-            for f in &mut self.body {
-                b += f.tick(raw);
-            }
-            return (raw * 0.5 + b * 0.9) * 4.0;
+            return self.bridge.last_out();
         }
 
-        // Bow-friction noise: band-limited turbulence, scaled by how hard the
-        // bow is gripping (velocity) plus an onset-scratch burst at the attack.
+        // Bow-friction noise + onset-scratch burst at the attack.
         let n = self.white();
-        self.noise_lp += 0.25 * (n - self.noise_lp); // ~one-pole ≈ 6 kHz
+        self.noise_lp += 0.25 * (n - self.noise_lp);
         let mut scratch = 0.0;
         if self.attack > 0 {
             self.attack -= 1;
@@ -335,7 +390,6 @@ impl Bowed {
         }
         let noise = self.noise_lp * self.noise_amt * self.vel_env + scratch;
 
-        // String velocity at the bow point from the two returning waves.
         let bridge_refl = -self.string_filter.tick(self.bridge.last_out());
         let nut_refl = -self.neck.last_out();
         let string_vel = bridge_refl + nut_refl;
@@ -343,14 +397,180 @@ impl Bowed {
         let new_vel = delta * bow_friction(delta, self.slope);
         self.neck.tick(bridge_refl + new_vel);
         self.bridge.tick(nut_refl + new_vel);
+        self.bridge.last_out()
+    }
+}
 
-        let raw = self.bridge.last_out();
-        // Body coloration: some direct + the formant resonances.
-        let mut b = 0.0;
-        for f in &mut self.body {
-            b += f.tick(raw);
+/// A single bowed string with its own body (one voice).
+pub struct Bowed {
+    string: BowString,
+    body: Body,
+}
+
+impl Bowed {
+    pub fn new(fs: f32, kind: StringKind) -> Self {
+        Bowed { string: BowString::new(fs, kind, kind as u32), body: Body::new(kind, fs) }
+    }
+
+    /// Start a note: `freq` Hz, `bow_velocity` and `bow_pressure` in [0, 1].
+    pub fn note_on(&mut self, freq: f32, bow_velocity: f32, bow_pressure: f32) {
+        self.string.note_on(freq, bow_velocity, bow_pressure);
+    }
+
+    /// Lift the bow — the string rings down.
+    pub fn note_off(&mut self) {
+        self.string.note_off();
+    }
+
+    /// Pizzicato: pluck the string. `velocity` in [0, 1].
+    pub fn pluck(&mut self, freq: f32, velocity: f32) {
+        self.string.pluck(freq, velocity);
+    }
+
+    /// Continuous bow control (during a note): speed and pressure in [0, 1].
+    pub fn set_bow(&mut self, bow_velocity: f32, bow_pressure: f32) {
+        self.string.set_bow(bow_velocity, bow_pressure);
+    }
+
+    /// Bow position: 0 = sul tasto (mellow), 1 = sul ponticello (glassy).
+    pub fn set_bow_position(&mut self, pos: f32) {
+        self.string.set_bow_position(pos);
+    }
+
+    /// Timbral brightness: 0 = dark/damped, 1 = bright/singing.
+    pub fn set_brightness(&mut self, amount: f32) {
+        self.string.set_brightness(amount);
+    }
+
+    /// Vibrato: rate (Hz) and depth (fraction of a semitone-ish).
+    pub fn set_vibrato(&mut self, rate_hz: f32, depth: f32) {
+        self.string.set_vibrato(rate_hz, depth);
+    }
+
+    /// One mono sample.
+    #[inline]
+    pub fn process(&mut self) -> f32 {
+        let raw = self.string.tick_raw();
+        self.body.tick(raw)
+    }
+}
+
+/// A whole bowed instrument: four strings tuned to the real open strings,
+/// sharing one resonant [`Body`]. Play notes with [`BowedInstrument::note_on`]
+/// (up to four at once → double/triple stops); the shared body means every note
+/// is coloured by the same instrument, and released strings ring down naturally.
+pub struct BowedInstrument {
+    strings: [BowString; 4],
+    body: Body,
+    open: [f32; 4],
+    playing: [Option<f32>; 4], // freq currently bowed on each string (None = ringing/idle)
+}
+
+impl BowedInstrument {
+    pub fn new(fs: f32, kind: StringKind) -> Self {
+        BowedInstrument {
+            strings: [
+                BowString::new(fs, kind, kind as u32 * 4),
+                BowString::new(fs, kind, kind as u32 * 4 + 1),
+                BowString::new(fs, kind, kind as u32 * 4 + 2),
+                BowString::new(fs, kind, kind as u32 * 4 + 3),
+            ],
+            body: Body::new(kind, fs),
+            open: kind.open_strings(),
+            playing: [None; 4],
         }
-        (raw * 0.5 + b * 0.9) * 4.0
+    }
+
+    /// Choose the string to play a frequency on: the highest open string not
+    /// above the note (so it can be reached by stopping up the fingerboard).
+    fn pick(&self, freq: f32) -> usize {
+        let mut idx = 0;
+        for i in 0..4 {
+            if self.open[i] <= freq * 1.0001 {
+                idx = i;
+            }
+        }
+        idx
+    }
+
+    /// Bow a note. Call twice on notes that map to different strings for a
+    /// double stop. Returns the string index used.
+    pub fn note_on(&mut self, freq: f32, bow_velocity: f32, bow_pressure: f32) -> usize {
+        let i = self.pick(freq);
+        self.strings[i].note_on(freq, bow_velocity, bow_pressure);
+        self.playing[i] = Some(freq);
+        i
+    }
+
+    /// Pluck a note (pizzicato). Returns the string index used.
+    pub fn pluck(&mut self, freq: f32, velocity: f32) -> usize {
+        let i = self.pick(freq);
+        self.strings[i].pluck(freq, velocity);
+        self.playing[i] = None;
+        i
+    }
+
+    /// Lift the bow on whichever string is playing `freq` (nearest match).
+    pub fn note_off(&mut self, freq: f32) {
+        let mut best = None;
+        let mut bestd = f32::MAX;
+        for i in 0..4 {
+            if let Some(f) = self.playing[i] {
+                let d = (f - freq).abs();
+                if d < bestd {
+                    bestd = d;
+                    best = Some(i);
+                }
+            }
+        }
+        if let Some(i) = best {
+            self.strings[i].note_off();
+            self.playing[i] = None;
+        }
+    }
+
+    /// Lift every bow (all strings ring down).
+    pub fn note_off_all(&mut self) {
+        for i in 0..4 {
+            self.strings[i].note_off();
+            self.playing[i] = None;
+        }
+    }
+
+    /// Bow position for all strings: 0 = sul tasto, 1 = sul ponticello.
+    pub fn set_bow_position(&mut self, pos: f32) {
+        for s in &mut self.strings {
+            s.set_bow_position(pos);
+        }
+    }
+
+    /// Brightness for all strings.
+    pub fn set_brightness(&mut self, amount: f32) {
+        for s in &mut self.strings {
+            s.set_brightness(amount);
+        }
+    }
+
+    /// Vibrato for all strings.
+    pub fn set_vibrato(&mut self, rate_hz: f32, depth: f32) {
+        for s in &mut self.strings {
+            s.set_vibrato(rate_hz, depth);
+        }
+    }
+
+    /// How many strings are currently sounding (bowed or ringing).
+    pub fn voices(&self) -> usize {
+        self.strings.iter().filter(|s| s.active()).count()
+    }
+
+    /// One mono sample: all four strings summed through the shared body.
+    #[inline]
+    pub fn process(&mut self) -> f32 {
+        let mut raw = 0.0;
+        for s in &mut self.strings {
+            raw += s.tick_raw();
+        }
+        self.body.tick(raw)
     }
 }
 
@@ -368,7 +588,6 @@ mod tests {
                 _ => 440.0,
             };
             v.note_on(freq, 0.7, 0.5);
-            // Bow for 1 s — should build a sustained tone.
             let mut peak_bowed = 0.0f32;
             for i in 0..48_000 {
                 let s = v.process();
@@ -379,7 +598,6 @@ mod tests {
             }
             assert!(peak_bowed > 0.02, "{kind:?} did not sustain: {peak_bowed}");
             assert!(peak_bowed < 50.0, "{kind:?} runaway: {peak_bowed}");
-            // Lift the bow — it should decay.
             v.note_off();
             for _ in 0..48_000 * 2 {
                 v.process();
@@ -398,7 +616,6 @@ mod tests {
             v.process();
         }
         let buf: Vec<f32> = (0..window).map(|_| v.process()).collect();
-        // Autocorrelation peak search over a musical lag range (60–1200 Hz).
         let lo = (fs / 1200.0) as usize;
         let hi = (fs / 60.0) as usize;
         let mut best_lag = lo;
@@ -419,14 +636,12 @@ mod tests {
     #[test]
     fn tuning_is_accurate() {
         let fs = 48_000.0;
-        // A4 on the violin.
         let mut v = Bowed::new(fs, StringKind::Violin);
         v.note_on(440.0, 0.7, 0.5);
         let f = measured_hz(&mut v, fs, 24_000, 8_192);
         let cents = 1200.0 * (f / 440.0).log2();
         assert!(cents.abs() < 15.0, "violin A4 off by {cents:.1} cents ({f:.1} Hz)");
 
-        // C3 on the cello.
         let mut c = Bowed::new(fs, StringKind::Cello);
         c.note_on(130.81, 0.7, 0.5);
         let f = measured_hz(&mut c, fs, 24_000, 16_384);
@@ -444,7 +659,6 @@ mod tests {
             peak = peak.max(v.process().abs());
         }
         assert!(peak > 0.02, "pluck too quiet: {peak}");
-        // Let it ring out; it must not self-sustain (no bow energy).
         for _ in 0..fs as usize * 2 {
             v.process();
         }
@@ -453,5 +667,44 @@ mod tests {
             tail = tail.max(v.process().abs());
         }
         assert!(tail < peak * 0.5, "pluck did not decay: tail {tail} vs peak {peak}");
+    }
+
+    #[test]
+    fn double_stop_plays_two_strings() {
+        let fs = 48_000.0;
+        let mut v = BowedInstrument::new(fs, StringKind::Violin);
+        // Open D (293.66) and open A (440) — a perfect fifth double stop.
+        let d = v.note_on(293.66, 0.7, 0.5);
+        let a = v.note_on(440.0, 0.7, 0.5);
+        assert_ne!(d, a, "double stop landed on the same string");
+        let mut peak = 0.0f32;
+        for i in 0..48_000 {
+            let s = v.process();
+            assert!(s.is_finite());
+            if i > 24_000 {
+                peak = peak.max(s.abs());
+            }
+        }
+        assert!(peak > 0.02, "double stop silent: {peak}");
+        assert!(peak < 60.0, "double stop runaway: {peak}");
+        assert!(v.voices() >= 2, "expected two sounding strings, got {}", v.voices());
+
+        // Release one; the other keeps singing.
+        v.note_off(440.0);
+        let mut still = 0.0f32;
+        for _ in 0..24_000 {
+            still = still.max(v.process().abs());
+        }
+        assert!(still > 0.02, "remaining string stopped too");
+    }
+
+    #[test]
+    fn string_crossing_picks_expected_strings() {
+        let v = BowedInstrument::new(48_000.0, StringKind::Cello);
+        // Cello open strings C2 G2 D3 A3 → indices 0..3.
+        assert_eq!(v.pick(65.41), 0);
+        assert_eq!(v.pick(98.0), 1);
+        assert_eq!(v.pick(150.0), 2); // just above D3
+        assert_eq!(v.pick(300.0), 3); // above A3, top string
     }
 }
