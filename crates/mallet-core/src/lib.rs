@@ -57,13 +57,17 @@ const fn m(ratio: f32, gain: f32, decay: f32) -> ModeSpec {
 
 // ── Mode data (physical / measured-informed) ────────────────────────────────
 
-/// Rosewood bar, undercut so the first overtone is two octaves up (≈1:4:10).
-const MARIMBA: &[ModeSpec] = &[m(1.0, 1.0, 1.0), m(3.9, 0.22, 0.5), m(9.2, 0.07, 0.3)];
-/// Rosewood bar tuned to the twelfth (≈1:3:6) — brighter, shorter than marimba.
+/// Rosewood bar, undercut so the overtones are two octaves + a third up.
+/// Measured (Iowa MIS): tuned 1 : 4.00 : ~9.9, the 10× partial dies fast.
+const MARIMBA: &[ModeSpec] = &[m(1.0, 1.0, 1.0), m(4.0, 0.22, 0.5), m(9.9, 0.07, 0.15)];
+/// Rosewood bar tuned to the twelfth — brighter, shorter than marimba.
+/// Measured (Iowa MIS): 3:1 exact; 3rd partial ~6.5; partials decay fast.
 const XYLOPHONE: &[ModeSpec] =
-    &[m(1.0, 1.0, 1.0), m(3.0, 0.3, 0.45), m(6.0, 0.12, 0.28), m(9.5, 0.05, 0.18)];
-/// Aluminum bar (≈1:4:10) — long metallic sustain, motor tremolo.
-const VIBRAPHONE: &[ModeSpec] = &[m(1.0, 1.0, 1.0), m(3.9, 0.3, 0.65), m(9.2, 0.1, 0.4)];
+    &[m(1.0, 1.0, 1.0), m(3.0, 0.3, 0.30), m(6.5, 0.12, 0.12), m(9.5, 0.05, 0.10)];
+/// Aluminum bar — long metallic sustain, motor tremolo.
+/// Measured (Iowa MIS): tuned dead-on 1 : 4.00 : 10.0; the 10× partial dies
+/// fast while the fundamental rings for many seconds.
+const VIBRAPHONE: &[ModeSpec] = &[m(1.0, 1.0, 1.0), m(4.0, 0.3, 0.6), m(10.0, 0.1, 0.1)];
 /// Steel bar, natural free-bar inharmonic modes (1 : 2.756 : 5.404 : 8.933).
 const GLOCKENSPIEL: &[ModeSpec] =
     &[m(1.0, 1.0, 1.0), m(2.756, 0.5, 0.6), m(5.404, 0.22, 0.4), m(8.933, 0.09, 0.25)];
@@ -109,10 +113,10 @@ pub enum Instrument {
 impl Instrument {
     pub fn timbre(self) -> Timbre {
         match self {
-            Instrument::Marimba => Timbre { modes: MARIMBA, base_t60: 0.55, decay_pitch: 0.7, mallet_cutoff: 2200.0, attack_ms: 1.5, level: 1.0, tremolo_hz: 0.0, tremolo_depth: 0.0 },
-            Instrument::Xylophone => Timbre { modes: XYLOPHONE, base_t60: 0.28, decay_pitch: 0.5, mallet_cutoff: 5500.0, attack_ms: 1.0, level: 1.0, tremolo_hz: 0.0, tremolo_depth: 0.0 },
-            Instrument::Vibraphone => Timbre { modes: VIBRAPHONE, base_t60: 4.0, decay_pitch: 0.6, mallet_cutoff: 3000.0, attack_ms: 2.0, level: 1.0, tremolo_hz: 5.5, tremolo_depth: 0.3 },
-            Instrument::Glockenspiel => Timbre { modes: GLOCKENSPIEL, base_t60: 0.9, decay_pitch: 0.5, mallet_cutoff: 8500.0, attack_ms: 0.8, level: 0.9, tremolo_hz: 0.0, tremolo_depth: 0.0 },
+            Instrument::Marimba => Timbre { modes: MARIMBA, base_t60: 0.55, decay_pitch: 0.85, mallet_cutoff: 2200.0, attack_ms: 1.5, level: 1.0, tremolo_hz: 0.0, tremolo_depth: 0.0 },
+            Instrument::Xylophone => Timbre { modes: XYLOPHONE, base_t60: 0.28, decay_pitch: 1.0, mallet_cutoff: 5500.0, attack_ms: 1.0, level: 1.0, tremolo_hz: 0.0, tremolo_depth: 0.0 },
+            Instrument::Vibraphone => Timbre { modes: VIBRAPHONE, base_t60: 9.0, decay_pitch: 0.35, mallet_cutoff: 3000.0, attack_ms: 2.0, level: 1.0, tremolo_hz: 5.5, tremolo_depth: 0.3 },
+            Instrument::Glockenspiel => Timbre { modes: GLOCKENSPIEL, base_t60: 1.3, decay_pitch: 0.5, mallet_cutoff: 8500.0, attack_ms: 0.8, level: 0.9, tremolo_hz: 0.0, tremolo_depth: 0.0 },
             Instrument::TubularBell => Timbre { modes: TUBULAR_BELL, base_t60: 3.5, decay_pitch: 0.8, mallet_cutoff: 4000.0, attack_ms: 2.5, level: 1.0, tremolo_hz: 0.0, tremolo_depth: 0.0 },
             Instrument::ChurchBell => Timbre { modes: CHURCH_BELL, base_t60: 5.0, decay_pitch: 0.9, mallet_cutoff: 3500.0, attack_ms: 3.0, level: 0.9, tremolo_hz: 0.0, tremolo_depth: 0.0 },
             Instrument::MusicBox => Timbre { modes: MUSIC_BOX, base_t60: 0.6, decay_pitch: 0.6, mallet_cutoff: 9000.0, attack_ms: 0.7, level: 0.7, tremolo_hz: 0.0, tremolo_depth: 0.0 },
