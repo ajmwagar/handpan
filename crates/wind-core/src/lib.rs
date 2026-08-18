@@ -80,21 +80,26 @@ impl Delay {
     }
 }
 
-/// One-zero averaging low-pass — the bore/bell reflection loss filter.
-/// `y = 0.5·gain·(x + x[n-1])`. A negative `gain` inverts (closed-end reflect).
-struct OneZero {
-    gain: f32,
-    x1: f32,
+/// The bore/bell reflection filter: a one-pole low-pass with a loss gain and a
+/// sign inversion (the closed reed end reflects with inverted phase). The pole
+/// sets how fast the upper (odd) harmonics are rolled off — the difference
+/// between a dark, woody clarinet and a buzzy square wave.
+struct Reflect {
+    /// Loss gain in (0, 1); closer to 1 = longer, more resonant.
+    loss: f32,
+    /// Low-pass smoothing coefficient in [0, 1); higher = darker.
+    damp: f32,
+    y1: f32,
 }
-impl OneZero {
-    fn new(gain: f32) -> Self {
-        OneZero { gain, x1: 0.0 }
+impl Reflect {
+    fn new(loss: f32, damp: f32) -> Self {
+        Reflect { loss, damp, y1: 0.0 }
     }
     #[inline]
     fn tick(&mut self, x: f32) -> f32 {
-        let y = 0.5 * self.gain * (x + self.x1);
-        self.x1 = x;
-        y
+        // One-pole low-pass, then invert and apply loss.
+        self.y1 = (1.0 - self.damp) * x + self.damp * self.y1;
+        -self.loss * self.y1
     }
 }
 
@@ -111,9 +116,12 @@ pub struct Wind {
     kind: WindKind,
 
     bore: Delay,
-    refl: OneZero,
+    refl: Reflect,
+    freq: f32,
 
-    // Reed table: out = clamp(offset + slope·Δp, -1, 1).
+    // Reed table: opening = clamp(offset + slope·Δp). A one-sided valve
+    // (asymmetric clamp) — the reed slams shut but can't invert — so it
+    // radiates the weak even harmonics a real clarinet has.
     reed_offset: f32,
     reed_slope: f32,
 
@@ -126,9 +134,15 @@ pub struct Wind {
     // Breath noise + vibrato.
     rng: u32,
     noise_gain: f32,
+    noise_lp: f32,
     vib_phase: f32,
     vib_rate: f32,
     vib_depth: f32,
+
+    // Bell-radiation even-harmonic term (DC-tracked) + output DC blocker.
+    even_dc: f32,
+    dc_x1: f32,
+    dc_y1: f32,
 
     out_gain: f32,
 }
@@ -138,13 +152,16 @@ impl Wind {
         let max = (fs / 40.0) as usize + 4; // lowest ~40 Hz bore
         let (reed_offset, reed_slope, out_gain, noise_gain) = match kind {
             // Clarinet reed: grippy negative-slope table (STK-style).
-            WindKind::Clarinet => (0.7, -0.44, 1.0, 0.02),
+            WindKind::Clarinet => (0.7, -0.44, 1.0, 0.07),
         };
         Wind {
             fs,
             kind,
             bore: Delay::new(max),
-            refl: OneZero::new(-0.95),
+            // Loss ~0.95, and a fairly dark loop (damp ~0.55) so the upper odd
+            // harmonics roll off — set_brightness moves the cutoff.
+            refl: Reflect::new(0.95, 0.55),
+            freq: 220.0,
             reed_offset,
             reed_slope,
             breath_target: 0.0,
@@ -153,19 +170,32 @@ impl Wind {
             release_rate: 0.0,
             rng: 0x2545_F491 ^ (kind as u32).wrapping_mul(0x9E37_79B9),
             noise_gain,
+            noise_lp: 0.0,
             vib_phase: 0.0,
             vib_rate: 5.0,
             vib_depth: 0.0,
+            even_dc: 0.0,
+            dc_x1: 0.0,
+            dc_y1: 0.0,
             out_gain,
         }
     }
 
     fn set_freq(&mut self, freq: f32) {
+        self.freq = freq;
+        self.update_delay();
+    }
+
+    /// Recompute the bore delay from the target frequency and the current loop
+    /// filter, so tuning stays correct as `set_brightness` moves the cutoff.
+    fn update_delay(&mut self) {
         match self.kind {
             WindKind::Clarinet => {
                 // Cylindrical quarter-wave: half the samples of an open pipe.
-                // Subtract the one-zero (0.5) + delay-cache (1) phase delay.
-                let d = (self.fs / freq * 0.5 - 1.5).max(4.0);
+                // Subtract the delay-cache (1) plus the one-pole reflection
+                // filter's group delay (≈ damp/(1-damp)) so it stays in tune.
+                let fgd = self.refl.damp / (1.0 - self.refl.damp);
+                let d = (self.fs / self.freq * 0.5 - 1.0 - fgd).max(4.0);
                 self.bore.set_delay(d);
             }
         }
@@ -205,21 +235,32 @@ impl Wind {
         self.vib_depth = depth.clamp(0.0, 0.5);
     }
 
-    /// Brightness/embouchure: reflection-filter gain. 0 = dark, 1 = bright.
+    /// Brightness/embouchure: moves the loop low-pass cutoff. 0 = dark and
+    /// woody (chalumeau), 1 = bright and reedy (a hard, buzzy embouchure).
     pub fn set_brightness(&mut self, amount: f32) {
         let a = amount.clamp(0.0, 1.0);
-        self.refl.gain = -0.98 + 0.10 * a;
+        // Dark: heavy smoothing (~1.2 kHz). Bright: light (~6 kHz).
+        self.refl.damp = 0.72 - 0.42 * a;
+        self.update_delay(); // cutoff change shifts group delay → keep in tune
     }
 
     #[inline]
     fn reed(&self, pdiff: f32) -> f32 {
-        let mut r = self.reed_offset + self.reed_slope * pdiff;
+        // Reed opening. A single reed is a one-sided valve: it can be blown
+        // fully shut (0) but not driven "inside out". Clamping asymmetrically
+        // — hard floor near 0, softer ceiling — breaks the perfect odd-only
+        // symmetry of an ideal cylinder and yields the weak even harmonics.
+        let r = self.reed_offset + self.reed_slope * pdiff;
         if r > 1.0 {
-            r = 1.0;
-        } else if r < -1.0 {
-            r = -1.0;
+            1.0
+        } else if r < -0.2 {
+            // Hard, asymmetric floor: the reed beats against the mouthpiece and
+            // stays shut. This clipping-on-one-side-only is what fills in the
+            // weak even harmonics a real (non-ideal) clarinet radiates.
+            -0.2
+        } else {
+            r
         }
-        r
     }
 
     /// One mono sample.
@@ -234,8 +275,11 @@ impl Wind {
         self.breath_env += rate * (self.breath_target - self.breath_env);
 
         // Breath = envelope + turbulence noise + vibrato (as pressure ripple).
+        // The noise is low-passed into an airy "breath" band rather than hiss.
+        let n = self.white();
+        self.noise_lp += 0.2 * (n - self.noise_lp);
         let mut breath = self.breath_env;
-        breath += breath * self.noise_gain * self.white();
+        breath += breath * self.noise_gain * self.noise_lp;
         if self.vib_depth > 0.0 {
             self.vib_phase += core::f32::consts::TAU * self.vib_rate / self.fs;
             if self.vib_phase > core::f32::consts::TAU {
@@ -244,12 +288,24 @@ impl Wind {
             breath += breath * self.vib_depth * 0.1 * mathf::sin(self.vib_phase);
         }
 
-        // Reflected bore pressure through the loss filter (sign-inverting),
-        // then the nonlinear reed scatters the pressure difference back in.
+        // Reflected bore pressure through the loss + low-pass filter (which
+        // also inverts), then the nonlinear reed scatters the pressure
+        // difference back into the bore.
         let refl = self.refl.tick(self.bore.last_out());
         let pdiff = refl - breath;
-        let out = self.bore.tick(breath + pdiff * self.reed(pdiff));
-        out * self.out_gain
+        let mut out = self.bore.tick(breath + pdiff * self.reed(pdiff));
+
+        // Bell/tone-hole radiation: a small squared (even-harmonic) term the
+        // ideal cylinder can't produce. DC-tracked so it adds h2/h4, not offset.
+        let sq = out * out;
+        self.even_dc += 0.0008 * (sq - self.even_dc);
+        out += 0.09 * (sq - self.even_dc);
+        // Block any residual DC on the way out.
+        let y = out - self.dc_x1 + 0.995 * self.dc_y1;
+        self.dc_x1 = out;
+        self.dc_y1 = y;
+
+        y * self.out_gain
     }
 }
 
