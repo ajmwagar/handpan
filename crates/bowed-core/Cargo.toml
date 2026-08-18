@@ -18,3 +18,7 @@ libm = { version = "0.2", optional = true }
 [[example]]
 name = "render_strings"
 required-features = ["std"]
+
+[[example]]
+name = "render_section"
+required-features = ["std"]
