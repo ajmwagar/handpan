@@ -236,6 +236,9 @@ pub struct Wind {
     breath_env: f32,
     attack_rate: f32,
     release_rate: f32,
+    // Onset "chiff": a short breathy transient at note-on (naturalness cue).
+    onset: u32,
+    onset_len: f32,
 
     // Breath noise + vibrato.
     rng: u32,
@@ -395,6 +398,8 @@ impl Wind {
             breath_env: 0.0,
             attack_rate: 0.0,
             release_rate: 0.0,
+            onset: 0,
+            onset_len: 1.0,
             rng: 0x2545_F491 ^ (kind as u32).wrapping_mul(0x9E37_79B9),
             noise_gain,
             noise_lp: 0.0,
@@ -494,6 +499,15 @@ impl Wind {
         self.set_breath(breath);
         self.attack_rate = 0.0009; // ~12 ms onset
         self.release_rate = 0.002;
+        // A breathy reed "chiff" at the attack — the naturalness cue the reeds
+        // were missing. Longer/airier on the sax, brief on the clarinet.
+        let ms = match self.kind {
+            WindKind::Saxophone => 0.06,
+            WindKind::Clarinet => 0.025,
+            _ => 0.0,
+        };
+        self.onset_len = (ms * self.fs).max(1.0);
+        self.onset = self.onset_len as u32;
     }
 
     /// Stop blowing — the tone dies quickly (winds have little sustain tail).
@@ -633,6 +647,13 @@ impl Wind {
         self.noise_lp += 0.2 * (n - self.noise_lp);
         let mut breath = self.breath_env * self.breath_move;
         breath += breath * self.noise_gain * self.noise_lp;
+        // Attack chiff: a decaying breath-noise burst over the onset window —
+        // the airy "tah" a reed makes as it catches. Fades to the steady tone.
+        if self.onset > 0 {
+            self.onset -= 1;
+            let env = self.onset as f32 / self.onset_len; // 1 → 0
+            breath += self.breath_env * (0.5 * env * env) * self.noise_lp;
+        }
         if self.vib_depth > 0.0 {
             self.vib_phase += core::f32::consts::TAU * self.vib_rate / self.fs;
             if self.vib_phase > core::f32::consts::TAU {

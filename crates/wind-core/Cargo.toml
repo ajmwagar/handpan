@@ -31,3 +31,7 @@ required-features = ["std"]
 [[example]]
 name = "render_didge"
 required-features = ["std"]
+
+[[example]]
+name = "render_sax"
+required-features = ["std"]
