@@ -12,6 +12,7 @@ fn main() -> std::io::Result<()> {
     let kind = match a.get(4).map(|s| s.as_str()) {
         Some("sax") => WindKind::Saxophone,
         Some("trumpet") => WindKind::Trumpet,
+        Some("didge") => WindKind::Didgeridoo,
         Some("flute") => WindKind::Flute,
         _ => WindKind::Clarinet,
     };

@@ -161,6 +161,9 @@ pub enum WindKind {
     /// Lip reed (buzzing lips) + flared brass bore — all harmonics, with
     /// amplitude-dependent "brassiness" (wave steepening) on loud notes.
     Trumpet,
+    /// Lip reed + long drone tube, shaped by a swept vocal-tract formant — the
+    /// "wah/wobble" of a didgeridoo. Circular-breathing drone; fixed low pitch.
+    Didgeridoo,
 }
 
 /// A wind instrument: a nonlinear reed exciter driving a bore waveguide.
@@ -218,6 +221,15 @@ pub struct Wind {
     tune_off: f32,
     flute_breath_bias: f32,
     flute_breath_scale: f32,
+
+    // Didgeridoo: a swept vocal-tract formant — an SVF band-pass whose centre a
+    // low LFO sweeps for the "wah" wobble, plus a manual centre (from Timbre).
+    svf_lp: f32,
+    svf_bp: f32,
+    formant_phase: f32,
+    wobble_rate: f32,
+    wobble_depth: f32,
+    formant_bias: f32,
 
     // Breath pressure, slewed so attacks/releases aren't clicks.
     breath_target: f32,
@@ -277,6 +289,10 @@ impl Wind {
             // Trumpet uses the lip resonator, not the reed table; noise seeds
             // a natural onset.
             WindKind::Trumpet => (0.0, 0.0, 2.0, 0.03),
+            // Didgeridoo: driven by the stable reed loop (fundamental-strong,
+            // no mode-hop) rather than a mode-hopping lip — the deep drone comes
+            // out reliably, then the vocal formant makes it a didgeridoo.
+            WindKind::Didgeridoo => (0.7, -0.44, 1.4, 0.05),
         };
         // Reflection: clarinet inverts (odd-harmonic, quarter-wave); the
         // conical sax and the brass bore are effectively open (all harmonics),
@@ -290,6 +306,11 @@ impl Wind {
             // Sax: the clarinet's INVERTING single-reed loop — stable and
             // fundamental-strong (no octave overblow); brighter/reedier.
             WindKind::Saxophone => (0.95, 0.4),
+            // Didgeridoo: the clarinet reed loop (fundamental-strong). Very high
+            // loop gain so the very low drone self-sustains robustly (the reed
+            // clips and self-limits, so it can't run away); bright/buzzy so the
+            // drone is rich; the vocal formant voices it.
+            WindKind::Didgeridoo => (0.9999, 0.45),
             // Trumpet: loss = low-freq bell reflection gain; damp = the bell
             // one-pole low-pass coeff (~1.2 kHz cutoff at bright 0.5).
             WindKind::Trumpet => (0.99, 0.82),
@@ -313,6 +334,11 @@ impl Wind {
             // where the real Iowa trumpet peaks (its h4), not up at 2.4 kHz.
             WindKind::Trumpet => {
                 [Peaking::new(1200.0, 1.0, 11.0, fs), Peaking::new(4500.0, 0.7, -4.0, fs)]
+            }
+            // Didgeridoo: the swept vocal formant carries the timbre; here just a
+            // low-body lift and a soft high cut.
+            WindKind::Didgeridoo => {
+                [Peaking::new(120.0, 0.6, 4.0, fs), Peaking::new(4000.0, 0.7, -4.0, fs)]
             }
         };
         // Flute jet parameters (jet_ratio, jet_refl, end_refl, tune_scale,
@@ -359,6 +385,12 @@ impl Wind {
             bell_y1: 0.0,
             bore_delay: 100.0,
             brass_dc: 0.0,
+            svf_lp: 0.0,
+            svf_bp: 0.0,
+            formant_phase: 0.0,
+            wobble_rate: 4.5,
+            wobble_depth: 1.0,
+            formant_bias: 0.5,
             breath_target: 0.0,
             breath_env: 0.0,
             attack_rate: 0.0,
@@ -391,6 +423,7 @@ impl Wind {
                     // fundamental-dominant body and rolls the trumpet's top off.
                     WindKind::Saxophone => 3500.0,
                     WindKind::Trumpet => 3000.0,
+                    WindKind::Didgeridoo => 3500.0,
                 };
                 mathf::exp(-core::f32::consts::TAU * fc / fs)
             },
@@ -422,6 +455,8 @@ impl Wind {
             // Brass bore: non-inverting all-harmonic loop; the tune_trim absorbs
             // the cache term and the bell-filter delay.
             WindKind::Trumpet => self.fs / self.freq - fgd + self.tune_trim,
+            // Didgeridoo drone: quarter-wave lip-tube (a low, lossy pipe).
+            WindKind::Didgeridoo => self.fs / self.freq * 0.5 - 1.0 - fgd,
         };
         let d = d.max(4.0);
         self.bore_delay = d;
@@ -477,6 +512,9 @@ impl Wind {
             WindKind::Flute => self.flute_breath_bias + self.flute_breath_scale * b,
             WindKind::Saxophone => 0.32 + 0.34 * b,
             WindKind::Trumpet => 0.30 + 0.45 * b,
+            // Circular-breathing drone: steady pressure in the reed's sweet spot
+            // — enough to keep the low reed oscillating, not so much it chokes.
+            WindKind::Didgeridoo => 0.60 + 0.16 * b,
         };
     }
 
@@ -514,6 +552,13 @@ impl Wind {
 
     /// Vibrato: rate (Hz) and depth (breath-pressure modulation, 0..~0.5).
     pub fn set_vibrato(&mut self, rate_hz: f32, depth: f32) {
+        // On the didgeridoo, "vibrato" is the wobble: the rate and depth of the
+        // vocal-formant sweep (the wah rhythm), not a pitch vibrato.
+        if self.kind == WindKind::Didgeridoo {
+            self.wobble_rate = rate_hz.max(0.0);
+            self.wobble_depth = (depth * 2.0).clamp(0.0, 1.0);
+            return;
+        }
         self.vib_rate = rate_hz.max(0.0);
         self.vib_depth = depth.clamp(0.0, 0.5);
     }
@@ -533,7 +578,12 @@ impl Wind {
             WindKind::Saxophone => 0.50 - 0.25 * a,
             // Moves the bell cutoff (brighter = higher cutoff = smaller g).
             WindKind::Trumpet => 0.87 - 0.10 * a,
+            WindKind::Didgeridoo => 0.55,
         };
+        // Timbre also biases the didgeridoo's vocal-formant centre (mouth shape).
+        if self.kind == WindKind::Didgeridoo {
+            self.formant_bias = a;
+        }
         self.update_delay(); // cutoff change shifts group delay → keep in tune
     }
 
@@ -595,7 +645,7 @@ impl Wind {
             // Single reed (clarinet cylindrical / sax conical): the reflected
             // bore pressure drives the nonlinear reed, scattered back in. The
             // clarinet's loop inverts (odd harmonics); the sax's does not (all).
-            WindKind::Clarinet | WindKind::Saxophone => {
+            WindKind::Clarinet | WindKind::Saxophone | WindKind::Didgeridoo => {
                 let refl = self.refl.tick(self.bore.last_out());
                 let pdiff = refl - breath;
                 self.bore.tick(breath + pdiff * self.reed(pdiff))
@@ -659,12 +709,35 @@ impl Wind {
         let even_amt = match self.kind {
             WindKind::Clarinet => 0.09,
             WindKind::Saxophone => 1.4,
+            WindKind::Didgeridoo => 0.5, // fill the buzzy all-harmonic drone
             _ => 0.0,
         };
         if even_amt > 0.0 {
             let sq = out * out;
             self.even_dc += 0.0008 * (sq - self.even_dc);
             out += even_amt * (sq - self.even_dc);
+        }
+
+        // Didgeridoo vocal-tract formant: a resonant band-pass (state-variable)
+        // whose centre a low LFO sweeps — the "wah" wobble that is the whole
+        // character of the instrument. Timbre biases the centre (mouth shape).
+        if self.kind == WindKind::Didgeridoo {
+            self.formant_phase += core::f32::consts::TAU * self.wobble_rate / self.fs;
+            if self.formant_phase > core::f32::consts::TAU {
+                self.formant_phase -= core::f32::consts::TAU;
+            }
+            let sweep = 0.5 * (1.0 - mathf::cos(self.formant_phase)); // 0..1
+            // Centre glides ~350 Hz → ~1.8 kHz, biased by Timbre.
+            let center = 350.0
+                + (0.25 + 0.55 * self.formant_bias) * 1500.0
+                + self.wobble_depth * sweep * 1100.0;
+            let f = (2.0 * mathf::sin(core::f32::consts::PI * center / self.fs)).min(1.4);
+            let damp = 0.22; // resonance (lower = more vocal/peaky)
+            self.svf_lp += f * self.svf_bp;
+            let hp = out - self.svf_lp - damp * self.svf_bp;
+            self.svf_bp += f * hp;
+            // Drone body + strong vocal band → the didgeridoo voice.
+            out = 0.45 * out + 1.7 * self.svf_bp;
         }
         // Block any residual DC on the way out.
         let y = out - self.dc_x1 + 0.995 * self.dc_y1;
@@ -897,6 +970,42 @@ mod tests {
             }
             assert!(tail < peak, "{kind:?} did not stop");
         }
+    }
+
+    #[test]
+    fn didgeridoo_drones_and_stops() {
+        let fs = 48_000.0;
+        let mut v = Wind::new(fs, WindKind::Didgeridoo);
+        v.set_vibrato(4.5, 0.5);
+        v.note_on(73.42, 0.9); // D2 drone
+        // Must self-sustain a low drone (not decay away).
+        let mut early = 0.0f32;
+        let mut late = 0.0f32;
+        for i in 0..fs as usize * 2 {
+            let s = v.process();
+            assert!(s.is_finite(), "non-finite");
+            if (fs as usize..fs as usize + 4_000).contains(&i) {
+                early = early.max(s.abs());
+            }
+            if i >= fs as usize * 2 - 4_000 {
+                late = late.max(s.abs());
+            }
+        }
+        assert!(late > 0.05, "didge did not sustain a drone: {late}");
+        assert!(late > early * 0.3, "didge decayed too much: {early} -> {late}");
+        // In tune (autocorrelation).
+        let f = measured_hz(&mut v, fs, 4_000, 16_384);
+        let cents = 1200.0 * (f / 73.42).log2();
+        assert!(cents.abs() < 30.0, "didge off by {cents:.1} cents ({f:.1})");
+        v.note_off();
+        for _ in 0..fs as usize {
+            v.process();
+        }
+        let mut tail = 0.0f32;
+        for _ in 0..4_800 {
+            tail = tail.max(v.process().abs());
+        }
+        assert!(tail < late, "didge did not stop after note_off");
     }
 
     #[test]
