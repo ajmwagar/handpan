@@ -269,9 +269,11 @@ impl Wind {
             // Flute: no reed table (jet drive); strong airy breath noise (a
             // real flute is markedly breathier than the raw jet oscillation).
             WindKind::Flute => (0.0, 0.0, 1.0, 0.14),
-            // Saxophone reed: same table, a touch grippier; breathier. Higher
-            // output gain compensates for the steep radiation low-pass.
-            WindKind::Saxophone => (0.7, -0.50, 3.5, 0.10),
+            // Saxophone reed: the clarinet's stable single-reed loop (strong
+            // fundamental, no octave overblow) voiced as a sax via strong
+            // even-harmonic radiation + a reedy formant. Less breath noise so it
+            // reads focused rather than washed out.
+            WindKind::Saxophone => (0.7, -0.50, 1.6, 0.05),
             // Trumpet uses the lip resonator, not the reed table; noise seeds
             // a natural onset.
             WindKind::Trumpet => (0.0, 0.0, 2.0, 0.03),
@@ -285,9 +287,9 @@ impl Wind {
             // Flute: inverting loss LP; heavy damping (0.60) keeps the 1st
             // register (lighter overblows to the octave or squeals).
             WindKind::Flute => (0.95, 0.60),
-            // Real alto sax is fundamental-dominant with a steep roll-off, so
-            // the conical loop is fairly dark (not the buzzy bright first try).
-            WindKind::Saxophone => (-0.97, 0.66),
+            // Sax: the clarinet's INVERTING single-reed loop — stable and
+            // fundamental-strong (no octave overblow); brighter/reedier.
+            WindKind::Saxophone => (0.95, 0.4),
             // Trumpet: loss = low-freq bell reflection gain; damp = the bell
             // one-pole low-pass coeff (~1.2 kHz cutoff at bright 0.5).
             WindKind::Trumpet => (0.99, 0.82),
@@ -302,10 +304,10 @@ impl Wind {
             WindKind::Flute => {
                 [Peaking::new(500.0, 0.7, 3.0, fs), Peaking::new(4000.0, 0.7, -6.0, fs)]
             }
-            // Saxophone: a low presence lift (strong fundamental, per the Iowa
-            // alto-sax spectrum) and the reedy ~1.6 kHz formant.
+            // Saxophone: a low lift for body + the reedy "honk" formant
+            // (~1.5 kHz) that gives the sax its focus/presence.
             WindKind::Saxophone => {
-                [Peaking::new(500.0, 0.7, 5.0, fs), Peaking::new(1300.0, 1.0, 2.0, fs)]
+                [Peaking::new(700.0, 0.7, 3.0, fs), Peaking::new(1500.0, 1.4, 8.0, fs)]
             }
             // Trumpet: the brass formant ("bridge") sits ~1.2–1.5 kHz — that is
             // where the real Iowa trumpet peaks (its h4), not up at 2.4 kHz.
@@ -387,7 +389,7 @@ impl Wind {
                     // Post-loop, so it darkens timbre without risking the
                     // oscillation: a steep roll-off gives the sax its
                     // fundamental-dominant body and rolls the trumpet's top off.
-                    WindKind::Saxophone => 950.0,
+                    WindKind::Saxophone => 3500.0,
                     WindKind::Trumpet => 3000.0,
                 };
                 mathf::exp(-core::f32::consts::TAU * fc / fs)
@@ -414,8 +416,9 @@ impl Wind {
             WindKind::Clarinet => self.fs / self.freq * 0.5 - 1.0 - fgd,
             // Open–open jet bore: full period, scaled/offset to hit pitch.
             WindKind::Flute => self.fs / self.freq * self.tune_scale - self.tune_off - 1.0 - fgd,
-            // Conical sax bore: effectively open (non-inverting loop), all harmonics.
-            WindKind::Saxophone => self.fs / self.freq - 1.0 - fgd,
+            // Sax on the clarinet's quarter-wave loop (half an open pipe); the
+            // even harmonics are added at the output, not by the bore.
+            WindKind::Saxophone => self.fs / self.freq * 0.5 - 1.0 - fgd,
             // Brass bore: non-inverting all-harmonic loop; the tune_trim absorbs
             // the cache term and the bell-filter delay.
             WindKind::Trumpet => self.fs / self.freq - fgd + self.tune_trim,
@@ -526,7 +529,8 @@ impl Wind {
             WindKind::Clarinet => 0.88 - 0.23 * a,
             // Narrow swing around 0.60 — a wide swing destabilizes the jet.
             WindKind::Flute => 0.64 - 0.08 * a,
-            WindKind::Saxophone => 0.72 - 0.12 * a,
+            // Reedy: brighter than the clarinet, around the honk formant.
+            WindKind::Saxophone => 0.50 - 0.25 * a,
             // Moves the bell cutoff (brighter = higher cutoff = smaller g).
             WindKind::Trumpet => 0.87 - 0.10 * a,
         };
@@ -648,13 +652,19 @@ impl Wind {
             }
         };
 
-        // Bell/tone-hole radiation: a small squared (even-harmonic) term the
-        // ideal cylinder can't produce — only the clarinet needs it (the sax
-        // and trumpet already carry even harmonics from their open bores).
-        if self.kind == WindKind::Clarinet {
+        // Squared (even-harmonic) radiation term. The clarinet/sax run on an
+        // odd-only cylindrical loop, so their even harmonics come from here —
+        // small for the clarinet, strong for the sax (that's what turns the
+        // hollow reed tone into a full, all-harmonic saxophone).
+        let even_amt = match self.kind {
+            WindKind::Clarinet => 0.09,
+            WindKind::Saxophone => 1.4,
+            _ => 0.0,
+        };
+        if even_amt > 0.0 {
             let sq = out * out;
             self.even_dc += 0.0008 * (sq - self.even_dc);
-            out += 0.09 * (sq - self.even_dc);
+            out += even_amt * (sq - self.even_dc);
         }
         // Block any residual DC on the way out.
         let y = out - self.dc_x1 + 0.995 * self.dc_y1;
