@@ -39,6 +39,59 @@ use alloc::vec::Vec;
 use puget_dsp::mathf;
 use puget_dsp::Delay;
 
+/// Two-argument arctangent built on the shared `mathf::atan` (which only covers
+/// the principal branch). Kept local so the crate stays `no_std` + `libm`.
+#[inline]
+fn atan2f(y: f32, x: f32) -> f32 {
+    use core::f32::consts::{FRAC_PI_2, PI};
+    if x > 0.0 {
+        mathf::atan(y / x)
+    } else if x < 0.0 {
+        if y >= 0.0 {
+            mathf::atan(y / x) + PI
+        } else {
+            mathf::atan(y / x) - PI
+        }
+    } else if y > 0.0 {
+        FRAC_PI_2
+    } else if y < 0.0 {
+        -FRAC_PI_2
+    } else {
+        0.0
+    }
+}
+
+/// Maximum second-order dispersion-allpass sections cascaded in a string loop.
+const DISP_MAX_STAGES: usize = 4;
+
+/// One second-order allpass section — the building block of the string-stiffness
+/// dispersion filter. A cascade of these has a tunable group-delay bump (set by
+/// pole radius `r` and centre `fpeak`); partials **above** the bump are advanced
+/// (stretched **sharp**), which is exactly the inharmonicity of a real stiff
+/// steel/bass string. First-order allpasses can't do this in the bass — their
+/// phase is flat at low frequencies, so a heavy low string comes out harmonic.
+#[derive(Clone, Copy, Default)]
+struct BiquadAP {
+    a1: f32,
+    a2: f32,
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+impl BiquadAP {
+    #[inline]
+    fn process(&mut self, x: f32) -> f32 {
+        // Allpass: H(z) = (a2 + a1 z⁻¹ + z⁻²) / (1 + a1 z⁻¹ + a2 z⁻²).
+        let y = self.a2 * x + self.a1 * self.x1 + self.x2 - self.a1 * self.y1 - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+}
+
 /// A 2-pole resonator (one body mode).
 #[derive(Default)]
 struct Reso {
@@ -84,11 +137,13 @@ struct PluckString {
     damp: f32,
     /// Loop gain (< 1): overall sustain.
     decay: f32,
-    /// String-stiffness allpass coefficient (negative = partials stretched
-    /// sharp); 0 disables the allpass entirely.
-    stiff: f32,
-    ap_x1: f32,
-    ap_y1: f32,
+    /// String-stiffness dispersion: a cascade of `disp_stages` identical
+    /// second-order allpass sections (shared coefficients `disp_a1`/`disp_a2`).
+    /// `disp_stages == 0` disables dispersion entirely.
+    disp_a1: f32,
+    disp_a2: f32,
+    disp_stages: usize,
+    disp: [BiquadAP; DISP_MAX_STAGES],
     /// Loop saturation drive (0 = clean).
     sat: f32,
     /// Noise-burst excitation state.
@@ -99,6 +154,14 @@ struct PluckString {
     /// excitation, plus its depth (0 = off).
     comb: Delay,
     comb_amt: f32,
+    /// External excitation injected into the loop this sample (sympathetic
+    /// coupling from a neighbouring string via the shared bridge). Consumed and
+    /// cleared each `tick`.
+    ext_in: f32,
+    /// Samples still to wait before the pending excitation burst begins — a
+    /// per-string strike micro-timing offset (a mallet doesn't contact every
+    /// string of a course on the same sample).
+    onset: u32,
     /// Transient extra brightness from the last pluck's velocity (decays away).
     vel_bright: f32,
     /// Nominal (open) pitch of the string in Hz.
@@ -125,15 +188,18 @@ impl PluckString {
             lp_y1: 0.0,
             damp: 0.5,
             decay: 0.996,
-            stiff: 0.0,
-            ap_x1: 0.0,
-            ap_y1: 0.0,
+            disp_a1: 0.0,
+            disp_a2: 0.0,
+            disp_stages: 0,
+            disp: [BiquadAP::default(); DISP_MAX_STAGES],
             sat: 0.0,
             rng: 0x9E37_79B9 ^ seed,
             exc_rem: 0,
             exc_amp: 0.0,
             comb: Delay::new(max),
             comb_amt: 0.0,
+            ext_in: 0.0,
+            onset: 0,
             vel_bright: 0.0,
             base_hz: 196.0,
             bend_cents: 0.0,
@@ -152,20 +218,75 @@ impl PluckString {
         self.rng ^= self.rng << 5;
         (self.rng as f32 / u32::MAX as f32) * 2.0 - 1.0
     }
+    /// Configure the string-stiffness dispersion: `stages` second-order allpass
+    /// sections with a group-delay bump of radius `r` (0..1) centred at
+    /// `fpeak_hz`. Partials above `fpeak_hz` are stretched sharp. `stages == 0`
+    /// (or `r == 0`) turns dispersion off.
+    fn set_dispersion(&mut self, r: f32, fpeak_hz: f32, stages: usize) {
+        let stages = stages.min(DISP_MAX_STAGES);
+        if stages == 0 || r <= 0.0 {
+            self.disp_stages = 0;
+            self.disp_a1 = 0.0;
+            self.disp_a2 = 0.0;
+            return;
+        }
+        self.disp_stages = stages;
+        let theta = core::f32::consts::TAU * fpeak_hz / self.fs;
+        self.disp_a1 = -2.0 * r * mathf::cos(theta);
+        self.disp_a2 = r * r;
+        for s in &mut self.disp {
+            s.a1 = self.disp_a1;
+            s.a2 = self.disp_a2;
+        }
+    }
+
+    /// Phase delay (samples) of the whole dispersion cascade at radian frequency
+    /// `w`. For one section H = e^{-2jw}·conj(D)/D, so its phase delay is
+    /// `2 + 2·∠D(e^{jw})/w`; the cascade multiplies by the stage count. Evaluated
+    /// only at the (sub-`fpeak`) fundamental, where ∠D stays on the principal
+    /// branch, so no unwrapping is needed.
+    #[inline]
+    fn disp_phase_delay(&self, w: f32) -> f32 {
+        if self.disp_stages == 0 {
+            return 0.0;
+        }
+        let (a1, a2) = (self.disp_a1, self.disp_a2);
+        let re = 1.0 + a1 * mathf::cos(w) + a2 * mathf::cos(2.0 * w);
+        let im = -(a1 * mathf::sin(w) + a2 * mathf::sin(2.0 * w));
+        let pd_one = 2.0 + 2.0 * atan2f(im, re) / w;
+        pd_one * self.disp_stages as f32
+    }
+
     fn set_freq(&mut self, freq: f32) {
         let raw = self.fs / freq;
-        // A first-order allpass (a + z⁻¹)/(1 + a·z⁻¹) adds frequency-dependent
-        // phase delay; subtract its value at the fundamental so the string still
-        // tunes to `freq`. (Only when the allpass is actually in the loop.)
-        let ap_pd = if self.stiff != 0.0 {
-            let a = self.stiff;
-            let w = core::f32::consts::TAU * freq / self.fs;
-            1.0 + (2.0 / w) * mathf::atan((a * mathf::sin(w)) / (1.0 + a * mathf::cos(w)))
+        let w = core::f32::consts::TAU * freq / self.fs;
+        // The loop's fractional-delay length must make the *total* loop delay
+        // equal one period. Besides the delay line the loop carries: the read
+        // cache (1 sample), the one-pole loss filter, and the dispersion
+        // allpass. Subtract each one's phase delay *at the fundamental* so the
+        // open string lands on pitch instead of a few cents flat.
+        let a = self.damp.clamp(0.0, 0.999);
+        let lp_pd = if w > 1e-6 {
+            mathf::atan(a * mathf::sin(w) / (1.0 - a * mathf::cos(w))) / w
         } else {
-            0.0
+            a / (1.0 - a)
         };
-        // Subtract the one-pole loss-filter (~0.5) + cache (1) + allpass delay.
-        self.delay.set_delay((raw - 1.5 - ap_pd).max(2.0));
+        let ap_pd = self.disp_phase_delay(w);
+        self.delay.set_delay((raw - 1.0 - lp_pd - ap_pd).max(2.0));
+    }
+
+    /// Inject external excitation into the loop next `tick` (sympathetic bridge
+    /// coupling from a neighbouring string).
+    #[inline]
+    fn inject(&mut self, x: f32) {
+        self.ext_in += x;
+    }
+
+    /// Delay the start of the pending excitation burst by `samples` (a per-string
+    /// strike micro-timing offset).
+    #[inline]
+    fn set_onset(&mut self, samples: u32) {
+        self.onset = samples;
     }
     /// Pluck: excite the loop with a comb-shaped noise burst ~one period long.
     fn pluck(&mut self, freq: f32, velocity: f32) {
@@ -212,7 +333,12 @@ impl PluckString {
                 if self.vib_phase >= core::f32::consts::TAU {
                     self.vib_phase -= core::f32::consts::TAU;
                 }
-                self.vib_depth * mathf::sin(self.vib_phase)
+                // Nonghyeon pushes the string *up* from the base pitch and lets
+                // it back — the player presses behind the bridge, which can only
+                // raise pitch. So the modulation is one-sided (0 → +depth),
+                // never symmetric around the note. A raised cosine gives that
+                // smooth push-and-release.
+                self.vib_depth * 0.5 * (1.0 - mathf::cos(self.vib_phase))
             } else {
                 0.0
             };
@@ -225,31 +351,38 @@ impl PluckString {
         self.vel_bright *= 0.9994;
         self.lp_y1 = (1.0 - damp) * s + damp * self.lp_y1;
         let mut fed = self.decay * self.lp_y1;
-        // String-stiffness dispersion allpass.
-        if self.stiff != 0.0 {
-            let y = self.stiff * fed + self.ap_x1 - self.stiff * self.ap_y1;
-            self.ap_x1 = fed;
-            self.ap_y1 = y;
-            fed = y;
+        // String-stiffness dispersion: cascade of second-order allpass sections.
+        for i in 0..self.disp_stages {
+            fed = self.disp[i].process(fed);
         }
         // Gentle loop saturation for harmonic warmth (unity for small signals).
         if self.sat != 0.0 {
             let k = 1.0 + self.sat;
             fed = mathf::tanh(k * fed) / k;
         }
-        let exc = if self.exc_rem > 0 {
+        let exc = if self.onset > 0 {
+            // Waiting out the per-string strike offset — no excitation yet.
+            self.onset -= 1;
+            0.0
+        } else if self.exc_rem > 0 {
             self.exc_rem -= 1;
             let n = self.white() * self.exc_amp;
             n - self.comb_amt * self.comb.tick(n)
         } else {
             0.0
         };
-        self.delay.tick(fed + exc);
+        // Sympathetic bridge coupling (consumed once).
+        let ext = self.ext_in;
+        self.ext_in = 0.0;
+        self.delay.tick(fed + exc + ext);
         s
     }
     #[inline]
     fn active(&self) -> bool {
-        self.exc_rem > 0 || self.lp_y1.abs() > 1e-5 || self.delay.last_out().abs() > 1e-5
+        self.exc_rem > 0
+            || self.onset > 0
+            || self.lp_y1.abs() > 1e-5
+            || self.delay.last_out().abs() > 1e-5
     }
 }
 
@@ -260,23 +393,36 @@ pub struct Cifteli {
     body: [Reso; 2],
     drone_hz: f32,
     body_mix: f32,
+    /// Melody → drone sympathetic coupling depth (shared bridge).
+    couple: f32,
 }
 
 impl Cifteli {
     pub fn new(fs: f32) -> Self {
-        Cifteli {
+        let mut c = Cifteli {
             drone: PluckString::new(fs, 0x1111),
             melody: PluckString::new(fs, 0x2222),
             // A small, bright boxy wooden body.
             body: [Reso::new(430.0, 12.0, 0.8, fs), Reso::new(1150.0, 9.0, 0.5, fs)],
             drone_hz: 196.0,
             body_mix: 0.12,
-        }
+            // Light sympathetic halo: enough to set the drone ringing when the
+            // melody is plucked, gentle enough never to run away.
+            couple: 0.02,
+        };
+        // Tune the drone loop up front so it can resonate sympathetically even
+        // before it is ever plucked.
+        c.drone.base_hz = c.drone_hz;
+        c.drone.set_freq(c.drone_hz);
+        c
     }
 
     /// Tune the drone string (Hz).
     pub fn set_drone_hz(&mut self, hz: f32) {
         self.drone_hz = hz.max(1.0);
+        // Keep the drone loop tuned so the sympathetic coupling rings true.
+        self.drone.base_hz = self.drone_hz;
+        self.drone.set_freq(self.drone_hz);
     }
 
     /// Pluck the drone string (at its tuned pitch).
@@ -317,8 +463,12 @@ impl Cifteli {
     /// a whisper of width between the strings.
     #[inline]
     pub fn process(&mut self) -> (f32, f32) {
-        let d = self.drone.tick();
+        // The melody and drone share a bridge: a little of the melody string's
+        // motion drives the drone loop, so plucking the melody sets the drone
+        // humming sympathetically — the çifteli's characteristic droning halo.
         let m = self.melody.tick();
+        self.drone.inject(self.couple * m);
+        let d = self.drone.tick();
         let mix = d + m;
         let mut b = 0.0;
         for r in &mut self.body {
@@ -370,7 +520,8 @@ impl Gayageum {
             // Silk strings over paulownia: warm, long, a touch of stiffness.
             s.damp = 0.42;
             s.decay = 0.9975;
-            s.stiff = -0.12;
+            // A whisper of dispersion (silk is only slightly stiff).
+            s.set_dispersion(0.55, 1600.0, 1);
             s.sat = 0.15;
             s.glide = 0.0025;
             s.vib_rate = 5.5;
@@ -527,11 +678,15 @@ impl Basitar {
         let mut low = PluckString::new(fs, 0x0B17);
         let mut high = PluckString::new(fs, 0x0B18);
         for s in [&mut low, &mut high] {
-            // Heavy strings: strong stiffness (inharmonic clank), long sustain,
-            // fairly dark loop with a bright picked attack.
+            // Heavy strings: strong stiffness (audible inharmonic clank — high
+            // partials pulled sharp), long sustain, fairly dark loop with a
+            // bright picked attack. A first-order allpass can't disperse a bass
+            // string (its phase is flat down low), so use a real second-order
+            // dispersion cascade whose group-delay bump sits at ~450 Hz: every
+            // partial above it is stretched sharp, like a real wound low string.
             s.damp = 0.38;
-            s.decay = 0.9985;
-            s.stiff = -0.24;
+            s.decay = 0.978;
+            s.set_dispersion(0.85, 450.0, 2);
             s.sat = 0.0; // grind lives in the amp stage, not the string loop
         }
         Basitar {
@@ -590,7 +745,9 @@ impl Basitar {
     /// Sustain of both strings: 0 = short/muted, 1 = long ringing.
     pub fn set_sustain(&mut self, amount: f32) {
         let a = amount.clamp(0.0, 1.0);
-        let decay = 0.993 + 0.0065 * a;
+        // Heavy strings still ring, but for a musical few seconds — not the ~30 s
+        // the old range gave a low string. At 82 Hz this spans ≈1.8 s … 5.5 s.
+        let decay = 0.955 + 0.030 * a;
         self.low.decay = decay;
         self.high.decay = decay;
     }
@@ -633,8 +790,22 @@ const SANTUR_STRINGS_PER_COURSE: usize = 3;
 /// One santur course: a handful of steel strings tuned to (almost) the same
 /// pitch and struck together. The tiny detuning between them beats, producing
 /// the instrument's signature shimmering chorus.
+/// Per-string detune pattern within a course, as a fraction of the shimmer
+/// width. Deliberately **asymmetric** (not ±spread/2): the two string-pairs then
+/// beat at unrelated rates, so the chorus breathes irregularly instead of
+/// pulsing as one coherent, mechanical wobble.
+const SANTUR_DETUNE_PATTERN: [f32; SANTUR_STRINGS_PER_COURSE] = [-0.62, 0.14, 0.58];
+/// Per-string loss trim: each string's (1 − decay) is scaled a few percent, so
+/// no two strings of a course decay at quite the same rate.
+const SANTUR_DECAY_TRIM: [f32; SANTUR_STRINGS_PER_COURSE] = [1.0, 0.965, 1.04];
+/// Per-string strike micro-timing (samples): a mezrab does not contact every
+/// string of a course on the same sample.
+const SANTUR_ONSET: [u32; SANTUR_STRINGS_PER_COURSE] = [0, 13, 5];
+
 struct Course {
     strings: [PluckString; SANTUR_STRINGS_PER_COURSE],
+    /// Base loop gain (before the per-string trim) most recently requested.
+    base_decay: f32,
 }
 impl Course {
     fn new(fs: f32, seed: u32) -> Self {
@@ -642,13 +813,23 @@ impl Course {
         let strings = core::array::from_fn(|k| {
             let mut s = PluckString::new(fs, seed ^ (0x2971u32.wrapping_mul(k as u32 + 1)));
             // Bright steel strings with a long, ringing shimmer and a touch of
-            // stiffness (the santur's high courses are audibly inharmonic).
+            // stiffness (the santur's high courses are audibly inharmonic, and
+            // steel reads bright — partials pulled a hair sharp, not flat).
             s.damp = 0.30;
-            s.decay = 0.9972;
-            s.stiff = -0.10;
+            s.set_dispersion(0.72, 1500.0, 1);
             s
         });
-        Course { strings }
+        let mut c = Course { strings, base_decay: 0.986 };
+        c.set_decay(0.986);
+        c
+    }
+    /// Apply a base loop gain to every string, scaled by its per-string trim so
+    /// the course's strings ring for slightly different lengths.
+    fn set_decay(&mut self, base: f32) {
+        self.base_decay = base;
+        for (k, s) in self.strings.iter_mut().enumerate() {
+            s.decay = (1.0 - (1.0 - base) * SANTUR_DECAY_TRIM[k]).clamp(0.0, 0.99999);
+        }
     }
     fn active(&self) -> bool {
         self.strings.iter().any(|s| s.active())
@@ -711,12 +892,13 @@ impl Santur {
         let hz = hz.max(1.0);
         let i = self.next;
         self.next = (self.next + 1) % self.courses.len();
-        let n = SANTUR_STRINGS_PER_COURSE as f32;
         for (k, s) in self.courses[i].strings.iter_mut().enumerate() {
-            // Spread the strings symmetrically across ±detune/2 cents.
-            let frac = if n > 1.0 { k as f32 / (n - 1.0) - 0.5 } else { 0.0 };
-            let cents = frac * self.detune_cents;
+            // Asymmetric detune → the string-pairs beat at unrelated rates for an
+            // irregular, breathing shimmer (not a coherent mechanical chorus).
+            let cents = SANTUR_DETUNE_PATTERN[k] * self.detune_cents;
             s.strike(hz * mathf::exp2(cents / 1200.0), velocity);
+            // A mezrab doesn't hit every string on the same sample.
+            s.set_onset(SANTUR_ONSET[k]);
         }
     }
 
@@ -740,11 +922,11 @@ impl Santur {
     /// Sustain of the strings: 0 = quickly damped, 1 = long ringing shimmer.
     pub fn set_sustain(&mut self, amount: f32) {
         let a = amount.clamp(0.0, 1.0);
-        let decay = 0.992 + 0.0068 * a;
+        // Moderate ring — a shimmering few seconds, not the 40 s+ the old range
+        // gave the low courses. Each string then gets its small per-string trim.
+        let decay = 0.978 + 0.016 * a;
         for c in &mut self.courses {
-            for s in &mut c.strings {
-                s.decay = decay;
-            }
+            c.set_decay(decay);
         }
     }
 
@@ -792,7 +974,45 @@ impl Santur {
 mod tests {
     use super::*;
 
-    #[test]
+    /// Magnitude of the DFT at frequency `f` over `buf` (Goertzel).
+    fn goertzel(buf: &[f32], fs: f32, f: f32) -> f32 {
+        let w = core::f32::consts::TAU * f / fs;
+        let cw = 2.0 * w.cos();
+        let (mut s1, mut s2) = (0.0f32, 0.0f32);
+        for &x in buf {
+            let s0 = x + cw * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        (s1 * s1 + s2 * s2 - cw * s1 * s2).abs().sqrt()
+    }
+
+    /// Precise frequency of the spectral peak within ±`win_cents` of `target`,
+    /// by a fine Goertzel scan of a post-attack window of `buf`.
+    fn peak_hz_near(buf: &[f32], fs: f32, target: f32, win_cents: f32) -> f32 {
+        let start = buf.len() / 6;
+        let seg = &buf[start..(start + (fs as usize).min(buf.len() - start))];
+        let lo = target * 2f32.powf(-win_cents / 1200.0);
+        let hi = target * 2f32.powf(win_cents / 1200.0);
+        let steps = 600usize;
+        let (mut best_f, mut best_m) = (target, f32::MIN);
+        for i in 0..=steps {
+            let f = lo + (hi - lo) * i as f32 / steps as f32;
+            let m = goertzel(seg, fs, f);
+            if m > best_m {
+                best_m = m;
+                best_f = f;
+            }
+        }
+        best_f
+    }
+
+    /// Cents of a partial relative to its ideal harmonic `k*f0`.
+    fn partial_cents(buf: &[f32], fs: f32, f0: f32, k: u32) -> f32 {
+        let target = k as f32 * f0;
+        let f = peak_hz_near(buf, fs, target, 90.0);
+        1200.0 * (f / target).log2()
+    }
 
     #[test]
     fn cifteli_plucks_ring_and_decay() {
@@ -826,28 +1046,48 @@ mod tests {
 
     #[test]
     fn melody_is_in_tune() {
+        // The delay-length compensation now accounts for the loss filter's true
+        // phase delay, so the open string lands within a couple of cents.
+        // (Autocorrelation is lag-quantized to ~8 cents here, far too coarse for
+        // a ±2-cent check, so measure the fundamental spectrally.)
         let fs = 48_000.0;
         let mut c = Cifteli::new(fs);
         c.set_sustain(1.0);
         c.pluck_melody(220.0, 1.0);
-        let buf: Vec<f32> = (0..16_384).map(|_| c.process().0).collect();
-        // autocorrelation
-        let (lo, hi) = ((fs / 400.0) as usize, (fs / 120.0) as usize);
-        let mut best = f32::MIN;
-        let mut lag0 = lo;
-        for lag in lo..hi {
-            let mut s = 0.0;
-            for i in 0..buf.len() - lag {
-                s += buf[i] * buf[i + lag];
-            }
-            if s > best {
-                best = s;
-                lag0 = lag;
-            }
-        }
-        let f = fs / lag0 as f32;
-        let cents = 1200.0 * (f / 220.0).log2();
-        assert!(cents.abs() < 20.0, "melody off by {cents:.1} cents ({f:.1} Hz)");
+        let buf: Vec<f32> = (0..24_000).map(|_| c.process().0).collect();
+        let cents = partial_cents(&buf, fs, 220.0, 1);
+        assert!(cents.abs() < 2.0, "melody off by {cents:.2} cents");
+    }
+
+    #[test]
+    fn open_strings_land_within_two_cents() {
+        // Every plucked voice's open-string fundamental must tune to within
+        // ±2 cents (the tightened compensation target).
+        let fs = 48_000.0;
+
+        let mut g = Gayageum::with_voices(fs, 1);
+        g.set_sustain(1.0);
+        g.set_vibrato(0.0, 0.0);
+        g.pluck(220.0, 1.0);
+        let gb: Vec<f32> = (0..24_000).map(|_| g.process().0).collect();
+        let gc = partial_cents(&gb, fs, 220.0, 1);
+        assert!(gc.abs() < 2.0, "gayageum off by {gc:.2} cents");
+
+        let mut b = Basitar::new(fs);
+        b.set_drive(0.0);
+        b.set_sustain(1.0);
+        b.pluck_low(110.0, 1.0);
+        let bb: Vec<f32> = (0..24_000).map(|_| b.process().0).collect();
+        let bc = partial_cents(&bb, fs, 110.0, 1);
+        assert!(bc.abs() < 2.0, "basitar low off by {bc:.2} cents");
+
+        let mut s = Santur::with_courses(fs, 1);
+        s.set_sustain(1.0);
+        s.set_shimmer(0.0);
+        s.strike(220.0, 1.0);
+        let sb: Vec<f32> = (0..24_000).map(|_| s.process().0).collect();
+        let sc = partial_cents(&sb, fs, 220.0, 1);
+        assert!(sc.abs() < 2.0, "santur course off by {sc:.2} cents");
     }
 
     #[test]
@@ -966,27 +1206,111 @@ mod tests {
         // A struck course should ring at the requested pitch (the unison spread
         // beats around it but the perceived pitch is the centre).
         let fs = 48_000.0;
+        // Dead unison isolates pure tuning from the shimmer beating.
         let mut s = Santur::with_courses(fs, 1);
         s.set_sustain(1.0);
+        s.set_shimmer(0.0);
+        s.strike(220.0, 1.0);
+        let buf: Vec<f32> = (0..24_000).map(|_| s.process().0).collect();
+        let cents = partial_cents(&buf, fs, 220.0, 1);
+        assert!(cents.abs() < 2.0, "course off by {cents:.2} cents");
+    }
+
+    #[test]
+    fn basitar_high_partials_are_sharp() {
+        // A heavy bass string is stiff: its high partials stretch audibly sharp
+        // (inharmonic clank). Measure partials 8 and 12 relative to the (in-tune)
+        // fundamental and require a real, monotone upward stretch.
+        let fs = 48_000.0;
+        let mut b = Basitar::new(fs);
+        b.set_drive(0.0);
+        b.set_sustain(1.0);
+        b.set_brightness(0.7);
+        b.pluck_low(110.0, 1.0);
+        let buf: Vec<f32> = (0..40_000).map(|_| b.process().0).collect();
+        let c1 = partial_cents(&buf, fs, 110.0, 1);
+        let c4 = partial_cents(&buf, fs, 110.0, 4);
+        let c8 = partial_cents(&buf, fs, 110.0, 8);
+        let c12 = partial_cents(&buf, fs, 110.0, 12);
+        assert!(c1.abs() < 2.0, "fundamental not in tune: {c1:.2} cents");
+        // Partials climb sharp with harmonic number.
+        assert!(
+            c12 - c1 > 12.0,
+            "partial 12 not sharp enough: stretch {:.1} cents (p1 {c1:.1}, p12 {c12:.1})",
+            c12 - c1
+        );
+        assert!(
+            c8 - c1 > 6.0,
+            "partial 8 not sharp enough: stretch {:.1} cents (p1 {c1:.1}, p8 {c8:.1})",
+            c8 - c1
+        );
+        assert!(c8 > c4 && c4 > c1, "dispersion not monotone: {c1:.1} {c4:.1} {c8:.1}");
+    }
+
+    #[test]
+    fn santur_shimmer_is_irregular() {
+        // The three strings of a course must not sit symmetrically around the
+        // pitch with identical decay/timing (that beats coherently — a
+        // mechanical chorus). Assert the detune is asymmetric, the pairwise beat
+        // rates are all distinct, and the decays and strike onsets differ.
+        let fs = 48_000.0;
+        let mut s = Santur::with_courses(fs, 1);
+        s.set_sustain(0.7);
         s.set_shimmer(5.0);
         s.strike(220.0, 1.0);
-        let buf: Vec<f32> = (0..16_384).map(|_| s.process().0).collect();
-        let (lo, hi) = ((fs / 400.0) as usize, (fs / 120.0) as usize);
-        let mut best = f32::MIN;
-        let mut lag0 = lo;
-        for lag in lo..hi {
-            let mut acc = 0.0;
-            for i in 0..buf.len() - lag {
-                acc += buf[i] * buf[i + lag];
-            }
-            if acc > best {
-                best = acc;
-                lag0 = lag;
-            }
+        let c = &s.courses[0];
+        let f: Vec<f32> = c.strings.iter().map(|st| st.base_hz).collect();
+
+        // Detune is asymmetric: the mean offset is not the centre string.
+        let mean = (f[0] + f[1] + f[2]) / 3.0;
+        assert!(
+            (mean - f[1]).abs() > 0.05,
+            "detune looks symmetric: {f:?} (mean {mean:.3})"
+        );
+
+        // The three pairwise beat rates must all be meaningfully different.
+        let b01 = (f[0] - f[1]).abs();
+        let b12 = (f[1] - f[2]).abs();
+        let b02 = (f[0] - f[2]).abs();
+        for (x, y, tag) in [(b01, b12, "01/12"), (b01, b02, "01/02"), (b12, b02, "12/02")] {
+            assert!(
+                (x - y).abs() > 0.1 * x.max(y),
+                "beat rates too close ({tag}): {x:.3} vs {y:.3} Hz"
+            );
         }
-        let f = fs / lag0 as f32;
-        let cents = 1200.0 * (f / 220.0).log2();
-        assert!(cents.abs() < 25.0, "course off by {cents:.1} cents ({f:.1} Hz)");
+
+        // Per-string decays differ (staggered ring-out).
+        let d: Vec<f32> = c.strings.iter().map(|st| st.decay).collect();
+        assert!(d[0] != d[1] && d[1] != d[2] && d[0] != d[2], "decays identical: {d:?}");
+
+        // Strike micro-timing differs (mezrab doesn't hit all strings at once).
+        let o: Vec<u32> = c.strings.iter().map(|st| st.onset).collect();
+        assert!(!(o[0] == o[1] && o[1] == o[2]), "onsets identical: {o:?}");
+    }
+
+    #[test]
+    fn cifteli_drone_rings_sympathetically() {
+        // Plucking only the melody string should set the (tuned, un-plucked)
+        // drone humming via the shared bridge.
+        let fs = 48_000.0;
+        let mut c = Cifteli::new(fs);
+        c.set_sustain(0.8);
+        c.set_drone_hz(196.0);
+        // Only the melody is struck.
+        c.pluck_melody(392.0, 1.0);
+        // Let it develop, then measure the drone string's own energy.
+        for _ in 0..24_000 {
+            c.process();
+        }
+        let mut drone_energy = 0.0f32;
+        for _ in 0..8_000 {
+            c.process();
+            drone_energy += c.drone.delay.last_out().powi(2);
+        }
+        assert!(
+            drone_energy > 1e-6 && drone_energy.is_finite(),
+            "drone did not ring sympathetically: energy {drone_energy:e}"
+        );
     }
 
     #[test]
