@@ -23,3 +23,7 @@ required-features = ["std"]
 [[example]]
 name = "render_gayageum"
 required-features = ["std"]
+
+[[example]]
+name = "render_basitar"
+required-features = ["std"]

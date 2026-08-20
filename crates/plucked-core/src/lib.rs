@@ -1,10 +1,12 @@
 //! # plucked-core
 //!
-//! Plucked-string physical modeling for lutes and zithers:
+//! Plucked-string physical modeling for lutes, zithers and electric strings:
 //! - the **[`Cifteli`]** — the two-string Albanian long-neck lute (a fixed
-//!   **drone** string plus a fretted **melody** string), and
+//!   **drone** string plus a fretted **melody** string),
 //! - the **[`Gayageum`]** — the Korean sanjo zither: a pool of long silk strings
-//!   with a warm paulownia body and deep left-hand *nonghyeon* (vibrato + bends).
+//!   with a warm paulownia body and deep left-hand *nonghyeon* (vibrato + bends),
+//! - the **[`Basitar`]** — the two-string bass/guitar hybrid: heavy strings
+//!   tuned a fifth apart through a pickup and amp grind (power-chord basslines).
 //!
 //! Each string is an extended **Karplus-Strong** waveguide — a fractional delay
 //! line closed by a loss/damping filter, excited by a noise burst — upgraded
@@ -474,9 +476,143 @@ impl Gayageum {
     }
 }
 
+/// The **basitar**: a two-string bass/guitar hybrid — a guitar stripped to two
+/// heavy-gauge strings tuned a fifth apart (Mark Sandman's low-slung invention,
+/// famous in the hands of Chris Ballew). It plays raw power-chord basslines: a
+/// low root string plus a string a fifth up, run through a pickup and a bit of
+/// amp grind.
+///
+/// The two strings are heavy — modeled with strong stiffness (audible
+/// inharmonic "clank"), long sustain, and a picked-near-the-bridge attack — and
+/// the output goes through an overdrive stage and a single-coil-style presence
+/// peak into an amp-like low-pass. Not an acoustic body: the "tone" is the
+/// pickup and the amp.
+pub struct Basitar {
+    low: PluckString,
+    high: PluckString,
+    /// Interval (semitones) the high string sits above the low. Classic basitar
+    /// tuning is a fifth (7).
+    interval: f32,
+    /// Overdrive / amp grind (0 = clean).
+    drive: f32,
+    /// Single-coil presence peak.
+    presence: Reso,
+    /// Amp-style output low-pass (one-pole) state + coefficient.
+    amp_lp: f32,
+    amp_pole: f32,
+    /// Stereo width (electric → mostly mono).
+    width: f32,
+}
+
+impl Basitar {
+    pub fn new(fs: f32) -> Self {
+        let mut low = PluckString::new(fs, 0x0B17);
+        let mut high = PluckString::new(fs, 0x0B18);
+        for s in [&mut low, &mut high] {
+            // Heavy strings: strong stiffness (inharmonic clank), long sustain,
+            // fairly dark loop with a bright picked attack.
+            s.damp = 0.38;
+            s.decay = 0.9985;
+            s.stiff = -0.24;
+            s.sat = 0.0; // grind lives in the amp stage, not the string loop
+        }
+        Basitar {
+            low,
+            high,
+            interval: 7.0,
+            drive: 0.25,
+            presence: Reso::new(2400.0, 2.2, 0.5, fs),
+            amp_lp: 0.0,
+            // ~4.5 kHz amp roll-off.
+            amp_pole: mathf::exp(-core::f32::consts::TAU * 4500.0 / fs),
+            width: 0.12,
+        }
+    }
+
+    /// Interval (semitones) between the two strings; classic tuning is a fifth.
+    pub fn set_interval(&mut self, semitones: f32) {
+        self.interval = semitones;
+    }
+
+    /// Pluck only the low (root) string.
+    pub fn pluck_low(&mut self, hz: f32, velocity: f32) {
+        self.low.pluck(hz, velocity);
+    }
+
+    /// Pluck only the high string.
+    pub fn pluck_high(&mut self, hz: f32, velocity: f32) {
+        self.high.pluck(hz, velocity);
+    }
+
+    /// Strum the power chord: root on the low string, a fifth (its `interval`)
+    /// up on the high string — the basitar's signature. `hz` is the root (feed
+    /// it already quantized). A tiny stagger between the strings mimics the pick
+    /// sweeping across both.
+    pub fn pluck(&mut self, hz: f32, velocity: f32) {
+        let hz = hz.max(1.0);
+        self.low.pluck(hz, velocity);
+        self.high.pluck(hz * mathf::exp2(self.interval / 12.0), velocity * 0.95);
+        // Offset the high string's excitation slightly (pick sweep).
+        self.high.exc_rem = self.high.exc_rem.saturating_add((0.0015 * self.high.fs) as u32);
+    }
+
+    /// Amp grind: 0 = clean, 1 = heavily overdriven.
+    pub fn set_drive(&mut self, amount: f32) {
+        self.drive = amount.clamp(0.0, 1.0);
+    }
+
+    /// Brightness of both strings: 0 = dark/dubby, 1 = bright and clanky.
+    pub fn set_brightness(&mut self, amount: f32) {
+        let a = amount.clamp(0.0, 1.0);
+        let damp = 0.55 - 0.35 * a;
+        self.low.damp = damp;
+        self.high.damp = damp;
+    }
+
+    /// Sustain of both strings: 0 = short/muted, 1 = long ringing.
+    pub fn set_sustain(&mut self, amount: f32) {
+        let a = amount.clamp(0.0, 1.0);
+        let decay = 0.993 + 0.0065 * a;
+        self.low.decay = decay;
+        self.high.decay = decay;
+    }
+
+    /// Stereo width (0 = mono, 1 = strings spread L/R).
+    pub fn set_width(&mut self, amount: f32) {
+        self.width = amount.clamp(0.0, 1.0);
+    }
+
+    /// Whether either string is still ringing.
+    pub fn active(&self) -> bool {
+        self.low.active() || self.high.active()
+    }
+
+    /// One stereo sample: strings → overdrive → presence → amp low-pass.
+    #[inline]
+    pub fn process(&mut self) -> (f32, f32) {
+        let lo = self.low.tick();
+        let hi = self.high.tick();
+        let mut x = lo + hi;
+        // Amp grind: asymmetric-ish soft clip driven by `drive`.
+        if self.drive > 0.0 {
+            let k = 1.0 + 6.0 * self.drive;
+            x = mathf::tanh(k * x) / mathf::tanh(k).max(1e-3);
+        }
+        // Single-coil presence peak (parallel), then amp roll-off.
+        x += 0.5 * self.presence.tick(x);
+        self.amp_lp = (1.0 - self.amp_pole) * x + self.amp_pole * self.amp_lp;
+        let out = self.amp_lp * 0.8;
+        // Mostly mono; a hair of string spread.
+        let spread = 0.5 * self.width * (lo - hi);
+        (out - spread, out + spread)
+    }
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+
+    #[test]
 
     #[test]
     fn cifteli_plucks_ring_and_decay() {
@@ -612,5 +748,77 @@ mod tests {
             swing_on > swing_off + 2.0,
             "vibrato did not modulate pitch: off {swing_off:.2} Hz, on {swing_on:.2} Hz"
         );
+    }
+
+    #[test]
+    fn basitar_power_chord_is_a_fifth() {
+        // The high string should ring a just-ish fifth (700 cents) above the low.
+        let fs = 48_000.0;
+
+        fn pitch(buf: &[f32], fs: f32, lo_hz: f32, hi_hz: f32) -> f32 {
+            let (lo, hi) = ((fs / hi_hz) as usize, (fs / lo_hz) as usize);
+            let mut best = f32::MIN;
+            let mut lag0 = lo;
+            for lag in lo..hi {
+                let mut s = 0.0;
+                for i in 0..buf.len() - lag {
+                    s += buf[i] * buf[i + lag];
+                }
+                if s > best {
+                    best = s;
+                    lag0 = lag;
+                }
+            }
+            fs / lag0 as f32
+        }
+
+        // Low string alone.
+        let mut b = Basitar::new(fs);
+        b.set_drive(0.0);
+        b.set_sustain(1.0);
+        b.pluck_low(110.0, 1.0);
+        let low: Vec<f32> = (0..16_384).map(|_| b.process().0).collect();
+        let f_low = pitch(&low, fs, 80.0, 200.0);
+
+        // High string alone (a fifth up = 7 semitones).
+        let mut b = Basitar::new(fs);
+        b.set_drive(0.0);
+        b.set_sustain(1.0);
+        b.pluck_high(110.0 * 2f32.powf(7.0 / 12.0), 1.0);
+        let high: Vec<f32> = (0..16_384).map(|_| b.process().0).collect();
+        let f_high = pitch(&high, fs, 120.0, 260.0);
+
+        let cents = 1200.0 * (f_high / f_low).log2();
+        assert!(
+            (cents - 700.0).abs() < 30.0,
+            "interval off: {cents:.1} cents ({f_low:.1} -> {f_high:.1} Hz)"
+        );
+    }
+
+    #[test]
+    fn basitar_rings_and_decays() {
+        let fs = 48_000.0;
+        let mut b = Basitar::new(fs);
+        b.set_drive(0.4);
+        b.set_sustain(0.6);
+        b.pluck(82.41, 0.9); // low E power chord
+        let mut peak = 0.0f32;
+        for i in 0..48_000 {
+            let (l, r) = b.process();
+            assert!(l.is_finite() && r.is_finite(), "non-finite");
+            if i < 4_000 {
+                peak = peak.max(l.abs()).max(r.abs());
+            }
+        }
+        assert!(peak > 0.02, "too quiet: {peak}");
+        for _ in 0..48_000 * 8 {
+            b.process();
+        }
+        let mut tail = 0.0f32;
+        for _ in 0..4_800 {
+            let (l, r) = b.process();
+            tail = tail.max(l.abs()).max(r.abs());
+        }
+        assert!(tail < peak, "did not decay: tail {tail} vs peak {peak}");
     }
 }
