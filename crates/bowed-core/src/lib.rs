@@ -154,6 +154,11 @@ pub enum StringKind {
     Viola,
     Cello,
     Bass,
+    /// The Persian **kamancheh**: a small upright spike fiddle whose spherical
+    /// body is faced with a stretched skin membrane, giving a bright, nasal,
+    /// vocal tone quite unlike the wooden violin. Bowed with a variable-tension
+    /// horsehair bow; violin-ish register.
+    Kamancheh,
 }
 
 impl StringKind {
@@ -168,6 +173,9 @@ impl StringKind {
             StringKind::Cello => [65.41, 98.00, 146.83, 220.00],
             // E1 A1 D2 G2
             StringKind::Bass => [41.20, 55.00, 73.42, 98.00],
+            // G3 D4 A4 D5 — a common Persian tuning (fifths + a fourth),
+            // violin-ish range.
+            StringKind::Kamancheh => [196.00, 293.66, 440.00, 587.33],
         }
     }
     /// String loss pole (higher = darker) and default bow position.
@@ -177,6 +185,9 @@ impl StringKind {
             StringKind::Viola => (0.58, 0.12),
             StringKind::Cello => (0.62, 0.11),
             StringKind::Bass => (0.66, 0.10),
+            // Thin gut/steel strings on a small body; bowed near the bridge for
+            // the bright, reedy kamancheh voice.
+            StringKind::Kamancheh => (0.54, 0.14),
         }
     }
 
@@ -203,6 +214,8 @@ impl StringKind {
             StringKind::Viola => (1.7, 2.8),
             StringKind::Cello => (1.25, 1.75),
             StringKind::Bass => (2.9, 4.6),
+            // Light and small like the violin, so it grips at a low slope.
+            StringKind::Kamancheh => (1.6, 3.4),
         }
     }
     /// Frequency scale applied to the violin body-mode template. (The bass uses
@@ -215,6 +228,7 @@ impl StringKind {
             StringKind::Viola => 0.82,
             StringKind::Cello => 0.52,
             StringKind::Bass => 0.20, // unused (bass has its own table)
+            StringKind::Kamancheh => 1.0, // unused (kamancheh has its own table)
         }
     }
 }
@@ -265,11 +279,31 @@ impl Body {
             (330.0, 6.0, 0.15),
             (500.0, 4.0, 0.12), // broad, weak; negligible above
         ];
+        // The kamancheh is NOT a scaled violin either: a small spherical body
+        // faced with a stretched skin membrane. That gives a strong low air/skin
+        // resonance, a pronounced nasal mid formant (the kamancheh "honk"), and
+        // bright skin radiation up top — vocal and reedy, without the violin's
+        // B1± wood cluster.
+        const TPL_KAMANCHEH: &[(f32, f32, f32)] = &[
+            (330.0, 12.0, 0.70), // skin/air main resonance
+            (600.0, 10.0, 1.00), // nasal formant (strongest)
+            (950.0, 9.0, 0.55),
+            (1500.0, 7.0, 0.45),
+            (2200.0, 5.0, 0.55), // bright skin radiation
+            (3200.0, 5.0, 0.35),
+        ];
         let nyq = fs * 0.45;
         let mut modes = Vec::with_capacity(TPL.len());
         match kind {
             StringKind::Bass => {
                 for &(f, q, g) in TPL_BASS {
+                    if f < nyq {
+                        modes.push(Reso::new(f, q, g, fs));
+                    }
+                }
+            }
+            StringKind::Kamancheh => {
+                for &(f, q, g) in TPL_KAMANCHEH {
                     if f < nyq {
                         modes.push(Reso::new(f, q, g, fs));
                     }
@@ -816,6 +850,22 @@ mod tests {
         let f = measured_hz(&mut c, fs, 24_000, 16_384);
         let cents = 1200.0 * (f / 130.81).log2();
         assert!(cents.abs() < 15.0, "cello C3 off by {cents:.1} cents ({f:.1} Hz)");
+    }
+
+    #[test]
+    fn kamancheh_sounds_and_is_in_tune() {
+        let fs = 48_000.0;
+        let mut k = Bowed::new(fs, StringKind::Kamancheh);
+        k.note_on(392.0, 0.7, 0.5); // G4
+        // It self-oscillates to an audible level.
+        let mut peak = 0.0f32;
+        for _ in 0..24_000 {
+            peak = peak.max(k.process().abs());
+        }
+        assert!(peak > 0.02, "kamancheh too quiet: {peak}");
+        let f = measured_hz(&mut k, fs, 8_000, 8_192);
+        let cents = 1200.0 * (f / 392.0).log2();
+        assert!(cents.abs() < 15.0, "kamancheh G4 off by {cents:.1} cents ({f:.1} Hz)");
     }
 
     #[test]

@@ -23,3 +23,7 @@ required-features = ["std"]
 [[example]]
 name = "render_section"
 required-features = ["std"]
+
+[[example]]
+name = "render_kamancheh"
+required-features = ["std"]
