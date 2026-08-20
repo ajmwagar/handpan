@@ -1,0 +1,26 @@
+# Membrane-drum physical modeling (bass drums of the dohol / davul family) —
+# 2D circular-membrane modal synthesis with a tension pitch-glide.
+# Dependency-free (internal workspace crates + optional libm only).
+#
+# Proprietary. Copyright (c) 2026 Avery Wagar. All rights reserved.
+[package]
+name = "drum-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Avery Wagar"]
+description = "Membrane-drum physical modeling: circular-membrane modal bass drums (dohol/davul family) with a tension pitch-glide"
+license-file = "../../LICENSE"
+publish = false
+
+[features]
+default = ["std"]
+std = ["puget-dsp/std"]
+libm = ["dep:libm", "puget-dsp/libm"]
+
+[dependencies]
+libm = { version = "0.2", optional = true }
+puget-dsp = { path = "../puget-dsp", default-features = false }
+
+[[example]]
+name = "render_dohol"
+required-features = ["std"]
