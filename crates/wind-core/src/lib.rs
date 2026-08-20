@@ -335,8 +335,14 @@ impl Wind {
             // drone is rich; the vocal formant voices it.
             WindKind::Didgeridoo => (0.9999, 0.45),
             // Trumpet: loss = low-freq bell reflection gain; damp = the bell
-            // one-pole low-pass coeff (~1.2 kHz cutoff at bright 0.5).
-            WindKind::Trumpet => (0.99, 0.82),
+            // one-pole low-pass coeff (~1.5 kHz cutoff at bright 0.5). Loss was
+            // 0.99, which made the bore modes so high-Q that the anti-resonances
+            // between them cut razor-deep notches — an f0/brightness-dependent
+            // comb null that gutted h3 (a 20+ dB hole reading hollow/muted).
+            // Broadening the modes to loss 0.93 fills those troughs, so the mid
+            // (h3) stays full and flat-topped across the register and the whole
+            // brightness swing, while still self-oscillating with margin.
+            WindKind::Trumpet => (0.93, 0.82),
         };
         let radiate = match kind {
             // Clarinet: presence lift restoring the sub-cutoff harmonics + a
@@ -348,10 +354,13 @@ impl Wind {
             WindKind::Flute => {
                 [Peaking::new(500.0, 0.7, 3.0, fs), Peaking::new(4000.0, 0.7, -6.0, fs)]
             }
-            // Saxophone: a low lift for body + the reedy "honk" formant
-            // (~1.5 kHz) that gives the sax its focus/presence.
+            // Saxophone: a formant pair that replaces the old monotonic roll-off
+            // with the measured alto scatter — an h3 notch (~760 Hz cut, so the
+            // 3rd/4th of low notes dip like the real horn) and the reedy "honk"
+            // resurge lifted at ~1.25 kHz (fills h4/h5 of low notes, h3 of the
+            // upper register). Post-loop EQ only — the reed loop is untouched.
             WindKind::Saxophone => {
-                [Peaking::new(700.0, 0.7, 3.0, fs), Peaking::new(1500.0, 1.4, 8.0, fs)]
+                [Peaking::new(760.0, 1.6, -6.5, fs), Peaking::new(1250.0, 1.0, 9.0, fs)]
             }
             // Trumpet: the brass formant ("bridge") sits ~1.2–1.5 kHz — that is
             // where the real Iowa trumpet peaks (its h4), not up at 2.4 kHz.
@@ -572,7 +581,13 @@ impl Wind {
             WindKind::Clarinet => 0.35 + 0.30 * b,
             // The flute's blowing window is narrow (onset ~0.84; overblows > 1.0).
             WindKind::Flute => self.flute_breath_bias + self.flute_breath_scale * b,
-            WindKind::Saxophone => 0.32 + 0.34 * b,
+            // Compressed sax breath map. The reed's stable window closes off
+            // above a target of ~0.64 (offset 0.7, slope -0.50): the old
+            // 0.32 + 0.34·b reached ~0.66 at full breath and choked the reed
+            // (silent notes at breath ≥ ~0.94). Topping at ~0.58 keeps full
+            // breath the loudest point while staying inside the stable window
+            // across G3–D5 and all brightness settings.
+            WindKind::Saxophone => 0.30 + 0.28 * b,
             WindKind::Trumpet => 0.30 + 0.45 * b,
             // Circular-breathing drone: steady pressure in the reed's sweet spot
             // — enough to keep the low reed oscillating, not so much it chokes.
@@ -1125,6 +1140,42 @@ mod tests {
                 let cents = 1200.0 * (f / f0).log2();
                 assert!(cents.abs() < 25.0, "{kind:?} {f0}Hz off by {cents:.1} cents ({f:.1})");
             }
+        }
+    }
+
+    #[test]
+    fn sax_sounds_at_full_breath() {
+        // Regression: the saxophone used to go SILENT at breath ≥ ~0.94 — the
+        // breath map drove the reed target past its stable window, choking the
+        // oscillation (measured RMS ~0.00 at breath 0.95–1.0). Every earlier
+        // test blew at ≤ 0.9, so the dead-zone slipped through. Assert audible,
+        // in-tune output at FULL breath across the whole G3–D5 register.
+        let fs = 48_000.0;
+        for &(f0, name) in &[
+            (196.0f32, "G3"),
+            (261.63, "C4"),
+            (329.63, "E4"),
+            (392.0, "G4"),
+            (523.25, "C5"),
+            (587.33, "D5"),
+        ] {
+            let mut v = Wind::new(fs, WindKind::Saxophone);
+            v.note_on(f0, 1.0); // full breath
+            for _ in 0..24_000 {
+                v.process();
+            }
+            let buf: Vec<f32> = (0..16_384).map(|_| v.process()).collect();
+            let rms =
+                (buf.iter().map(|x| x * x).sum::<f32>() / buf.len() as f32).sqrt();
+            assert!(rms.is_finite(), "sax {name} non-finite at full breath");
+            assert!(rms > 0.1, "sax {name} silent at full breath: rms {rms:.4}");
+            // Must still self-oscillate IN TUNE at full breath.
+            let f = measured_hz(&mut v, fs, 4_000, 16_384);
+            let cents = 1200.0 * (f / f0).log2();
+            assert!(
+                cents.abs() < 30.0,
+                "sax {name} out of tune at full breath: {cents:.1} cents ({f:.1} Hz)"
+            );
         }
     }
 
