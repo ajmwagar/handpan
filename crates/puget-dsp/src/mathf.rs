@@ -36,6 +36,10 @@ mod imp {
     pub fn tanh(x: f32) -> f32 {
         x.tanh()
     }
+    #[inline]
+    pub fn atan(x: f32) -> f32 {
+        x.atan()
+    }
 }
 
 #[cfg(all(not(feature = "std"), feature = "libm"))]
@@ -72,9 +76,13 @@ mod imp {
     pub fn tanh(x: f32) -> f32 {
         libm::tanhf(x)
     }
+    #[inline]
+    pub fn atan(x: f32) -> f32 {
+        libm::atanf(x)
+    }
 }
 
-pub use imp::{cos, exp, floor, log2, powf, sin, sqrt, tanh};
+pub use imp::{atan, cos, exp, floor, log2, powf, sin, sqrt, tanh};
 
 /// 2^x = e^(x·ln2).
 #[inline]
