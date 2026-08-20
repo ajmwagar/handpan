@@ -179,6 +179,32 @@ impl StringKind {
             StringKind::Bass => (0.66, 0.10),
         }
     }
+
+    /// Bow-force → friction-`slope` range, `(slope_at_full_pressure, slope_at_zero_pressure)`.
+    ///
+    /// In the stick-slip friction table the saturated (stick / capture) region
+    /// has half-width `0.25 / slope`, so a **smaller** slope means a **wider**
+    /// stick region — a longer stick phase, a stronger Helmholtz corner, and a
+    /// louder, richer tone. A real string gets louder and grippier with more bow
+    /// force up to an over-pressure edge, so pressure must map to a *decreasing*
+    /// slope (wider capture), not the increasing one that made firm bowing thin
+    /// and quiet.
+    ///
+    /// The range is per-kind because the four instruments differ in string mass
+    /// and admittance: the light violin/viola reach full Helmholtz motion at a
+    /// low slope, while the heavy, low-tuned cello and bass would over-drive
+    /// there, so their playable window sits at a higher (gentler) slope. The two
+    /// endpoints bracket the playable dynamic range from soft (`p = 0`) to a
+    /// controlled fortissimo at the over-pressure edge (`p = 1`); the midpoint
+    /// stays near the historical `slope = 3` so existing calibration holds.
+    fn bow_force_range(self) -> (f32, f32) {
+        match self {
+            StringKind::Violin => (1.5, 3.6),
+            StringKind::Viola => (1.7, 2.8),
+            StringKind::Cello => (1.25, 1.75),
+            StringKind::Bass => (2.9, 4.6),
+        }
+    }
     /// Frequency scale applied to the violin body-mode template. (The bass uses
     /// its own table instead — see [`Body::new`].)
     fn body_scale(self) -> f32 {
@@ -284,6 +310,9 @@ struct BowString {
     max_vel_target: f32,
     vel_env: f32,
     slope: f32,
+    // Friction-slope endpoints (full-pressure, zero-pressure) for this kind.
+    slope_lo: f32,
+    slope_hi: f32,
     // Vibrato.
     vib_phase: f32,
     vib_rate: f32,
@@ -301,6 +330,7 @@ struct BowString {
 impl BowString {
     fn new(fs: f32, kind: StringKind, seed: u32) -> Self {
         let (pole, bow_pos) = kind.string_def();
+        let (slope_lo, slope_hi) = kind.bow_force_range();
         let max = (fs / 40.0) as usize + 4; // lowest ~40 Hz
         BowString {
             fs,
@@ -312,6 +342,8 @@ impl BowString {
             max_vel_target: 0.0,
             vel_env: 0.0,
             slope: 3.0,
+            slope_lo,
+            slope_hi,
             vib_phase: 0.0,
             vib_rate: 5.5,
             vib_depth: 0.0,
@@ -366,7 +398,11 @@ impl BowString {
 
     fn set_bow(&mut self, bow_velocity: f32, bow_pressure: f32) {
         self.max_vel_target = 0.03 + 0.22 * bow_velocity.clamp(0.0, 1.0);
-        self.slope = 1.0 + 4.0 * bow_pressure.clamp(0.0, 1.0);
+        // More bow force WIDENS the stick region (louder, richer), so pressure
+        // interpolates the friction slope from its zero-pressure (soft, high
+        // slope) endpoint down to its full-pressure (loud, low slope) endpoint.
+        let p = bow_pressure.clamp(0.0, 1.0);
+        self.slope = self.slope_hi + (self.slope_lo - self.slope_hi) * p;
     }
 
     fn set_bow_position(&mut self, pos: f32) {
@@ -871,5 +907,110 @@ mod tests {
         assert_eq!(v.pick(98.0), 1);
         assert_eq!(v.pick(150.0), 2); // just above D3
         assert_eq!(v.pick(300.0), 3); // above A3, top string
+    }
+
+    /// Settle a freshly-bowed voice, then measure (rms, peak, all-finite) over a
+    /// window — the loudness a realism audit reads off the pressure×velocity grid.
+    fn bowed_rms(kind: StringKind, freq: f32, bv: f32, pressure: f32) -> (f32, f32, bool) {
+        let fs = 48_000.0;
+        let mut v = Bowed::new(fs, kind);
+        v.note_on(freq, bv, pressure);
+        let mut finite = true;
+        for _ in 0..24_000 {
+            if !v.process().is_finite() {
+                finite = false;
+            }
+        }
+        let (mut acc, mut peak) = (0.0f64, 0.0f32);
+        let window = 16_384;
+        for _ in 0..window {
+            let s = v.process();
+            if !s.is_finite() {
+                finite = false;
+            }
+            peak = peak.max(s.abs());
+            acc += (s as f64) * (s as f64);
+        }
+        ((acc / window as f64).sqrt() as f32, peak, finite)
+    }
+
+    /// The bow-force cliff regression: a real string gets *louder* (never quieter)
+    /// with more bow force up to an over-pressure edge. Before the pressure→slope
+    /// mapping fix the stick region collapsed as pressure rose, so firm bowing got
+    /// dramatically quieter (violin bv0.7: p0.0 rms ≈ 24 → p0.5 ≈ 5). Assert
+    /// loudness is monotonic-non-decreasing vs pressure (within tolerance) and
+    /// stays audible at full pressure, for violin and cello.
+    #[test]
+    fn loudness_is_monotonic_in_pressure() {
+        // 15% local slack absorbs the friction model's regime-transition ripple
+        // while still catching any real collapse (the bug was a ~4x drop).
+        const TOL: f32 = 0.85;
+        for (kind, freq) in [(StringKind::Violin, 440.0), (StringKind::Cello, 130.81)] {
+            for &bv in &[0.7f32] {
+                let pressures = [0.0f32, 0.25, 0.5, 0.75, 1.0];
+                let mut rms = [0.0f32; 5];
+                for (i, &p) in pressures.iter().enumerate() {
+                    let (r, pk, fin) = bowed_rms(kind, freq, bv, p);
+                    assert!(fin, "{kind:?} non-finite at pressure {p}");
+                    assert!(pk < 80.0, "{kind:?} runaway ({pk}) at pressure {p}");
+                    rms[i] = r;
+                }
+                // Monotonic-non-decreasing vs a running maximum (within TOL).
+                let mut run = rms[0];
+                for (i, &r) in rms.iter().enumerate() {
+                    assert!(
+                        r >= run * TOL,
+                        "{kind:?} bv{bv} loudness cliff at p={}: rms {r:.2} < {:.2} (running max {run:.2}); full curve {rms:?}",
+                        pressures[i],
+                        run * TOL,
+                    );
+                    run = run.max(r);
+                }
+                // Firm bowing must be clearly louder than light bowing — the whole
+                // point of the fix — and fortissimo must be audible, not a dropout.
+                assert!(
+                    rms[4] > rms[1] * 1.2,
+                    "{kind:?} firm bowing not louder than light: p1 {:.2} vs p0.25 {:.2}",
+                    rms[4],
+                    rms[1],
+                );
+                assert!(rms[4] > 2.0, "{kind:?} fortissimo too quiet: {:.2}", rms[4]);
+            }
+        }
+    }
+
+    /// The full playability sweep: every StringKind, over the pressure×bow-velocity
+    /// grid, must self-oscillate cleanly — finite, no blow-up, no silent dropout —
+    /// and loudness must be monotonic-non-decreasing vs pressure (within tolerance)
+    /// on the coarse playable grid.
+    #[test]
+    fn bow_force_sweep_stable_and_monotonic_all_kinds() {
+        const TOL: f32 = 0.80;
+        let pressures = [0.0f32, 0.25, 0.5, 0.75, 1.0];
+        let bowvels = [0.4f32, 0.7, 1.0];
+        for (kind, freq) in [
+            (StringKind::Violin, 440.0),
+            (StringKind::Viola, 293.66),
+            (StringKind::Cello, 130.81),
+            (StringKind::Bass, 55.0),
+        ] {
+            for &bv in &bowvels {
+                let mut run = -1.0f32;
+                for &p in &pressures {
+                    let (r, pk, fin) = bowed_rms(kind, freq, bv, p);
+                    assert!(fin, "{kind:?} bv{bv} p{p}: non-finite (NaN/denormal blow-up)");
+                    assert!(pk < 80.0, "{kind:?} bv{bv} p{p}: runaway peak {pk}");
+                    assert!(r > 0.5, "{kind:?} bv{bv} p{p}: silent dropout, rms {r}");
+                    if run >= 0.0 {
+                        assert!(
+                            r >= run * TOL,
+                            "{kind:?} bv{bv}: loudness collapse at p={p}: rms {r:.2} < {:.2} (running max {run:.2})",
+                            run * TOL,
+                        );
+                    }
+                    run = run.max(r);
+                }
+            }
+        }
     }
 }
