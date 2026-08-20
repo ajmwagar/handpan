@@ -8,7 +8,9 @@
 //! - the **[`Basitar`]** — the two-string bass/guitar hybrid: heavy strings
 //!   tuned a fifth apart through a pickup and amp grind (power-chord basslines),
 //! - the **[`Santur`]** — the Persian trapezoidal hammered dulcimer: courses of
-//!   near-unison steel strings *struck* by a mallet into a shimmering chorus.
+//!   near-unison steel strings *struck* by a mallet into a shimmering chorus,
+//! - the **[`Tar`]** — the Persian long-neck lute: doubled courses plucked with
+//!   a brass plectrum over a bright, nasal *skin-membrane* top.
 //!
 //! Each string is an extended **Karplus-Strong** waveguide — a fractional delay
 //! line closed by a loss/damping filter, excited by a noise burst — upgraded
@@ -1050,6 +1052,173 @@ impl Santur {
     }
 }
 
+/// Strings per tar course (a doubled course — two strings to a note).
+const TAR_STRINGS_PER_COURSE: usize = 2;
+/// A tar course's two strings sit a few cents apart (the paired-string chorus).
+const TAR_DETUNE_PATTERN: [f32; TAR_STRINGS_PER_COURSE] = [-0.5, 0.5];
+
+/// One tar course: a pair of strings tuned to (almost) the same pitch and
+/// plucked together by the brass plectrum, their slight detuning giving the
+/// paired-course shimmer.
+struct TarCourse {
+    strings: [PluckString; TAR_STRINGS_PER_COURSE],
+}
+impl TarCourse {
+    fn new(fs: f32, seed: u32) -> Self {
+        let strings = core::array::from_fn(|k| {
+            let mut s = PluckString::new(fs, seed ^ (0x3517u32.wrapping_mul(k as u32 + 1)));
+            // Bright bronze/steel strings, long ringing, a touch of stiffness.
+            s.damp = 0.40;
+            s.decay = 0.9965;
+            s.set_dispersion(0.4, 2000.0, 1);
+            s
+        });
+        TarCourse { strings }
+    }
+    fn active(&self) -> bool {
+        self.strings.iter().any(|s| s.active())
+    }
+}
+
+/// The **tar**: the central long-necked lute of Persian classical music. Its
+/// waisted double-bowl is faced not with wood but a stretched **skin membrane**
+/// (traditionally a lamb's heart sac), which gives the tar its bright, singing,
+/// slightly nasal twang — quite unlike a wooden-bodied oud. The strings run in
+/// **doubled courses**, plucked with a brass plectrum (*mezrab*).
+///
+/// A modular voice maps onto it as a **pool of courses**: each pluck allocates
+/// the next course (round-robin) so notes ring on and bloom together, and each
+/// course sounds a pair of strings with a tiny detune + plectrum-sweep stagger.
+/// The skin-membrane top is modeled as a bright, resonant body (higher and more
+/// nasal than the wooden lutes). Feed it already-quantized pitches.
+pub struct Tar {
+    courses: Vec<TarCourse>,
+    body: [Reso; 3],
+    body_mix: f32,
+    next: usize,
+    detune_cents: f32,
+    width: f32,
+}
+
+impl Tar {
+    /// Build a tar voice with default polyphony.
+    pub fn new(fs: f32) -> Self {
+        Self::with_courses(fs, 6)
+    }
+
+    /// Build with an explicit polyphony (overlapping courses).
+    pub fn with_courses(fs: f32, courses: usize) -> Self {
+        let courses_n = courses.max(1);
+        let mut courses = Vec::with_capacity(courses_n);
+        for i in 0..courses_n {
+            courses.push(TarCourse::new(fs, 0x7A19u32.wrapping_mul(i as u32 + 1)));
+        }
+        Tar {
+            courses,
+            // Skin-membrane top: bright, resonant, a little nasal — higher and
+            // more sustaining than a wooden soundbox.
+            body: [
+                Reso::new(320.0, 8.0, 0.7, fs),
+                Reso::new(880.0, 6.0, 0.5, fs),
+                Reso::new(2400.0, 5.0, 0.35, fs),
+            ],
+            body_mix: 0.20,
+            next: 0,
+            detune_cents: 4.0,
+            width: 0.35,
+        }
+    }
+
+    /// Pluck a note (Hz — feed it already quantized). Allocates the next course
+    /// and plucks its pair of strings, detuned a few cents with a tiny sweep.
+    pub fn pluck(&mut self, hz: f32, velocity: f32) {
+        let hz = hz.max(1.0);
+        let i = self.next;
+        self.next = (self.next + 1) % self.courses.len();
+        for (k, s) in self.courses[i].strings.iter_mut().enumerate() {
+            let cents = TAR_DETUNE_PATTERN[k] * self.detune_cents;
+            s.pluck(hz * mathf::exp2(cents / 1200.0), velocity);
+            // The plectrum crosses the two strings a hair apart.
+            s.set_onset((k as f32 * 0.0007 * s.fs) as u32);
+        }
+    }
+
+    /// Detune between the two strings of a course, in cents (the paired-string
+    /// chorus). Applies to the next pluck.
+    pub fn set_chorus(&mut self, cents: f32) {
+        self.detune_cents = cents.max(0.0);
+    }
+
+    /// Brightness of the strings: 0 = mellow, 1 = bright and twangy.
+    pub fn set_brightness(&mut self, amount: f32) {
+        let a = amount.clamp(0.0, 1.0);
+        let damp = 0.55 - 0.35 * a;
+        for c in &mut self.courses {
+            for s in &mut c.strings {
+                s.damp = damp;
+            }
+        }
+    }
+
+    /// Sustain of the strings: 0 = short, 1 = long ringing.
+    pub fn set_sustain(&mut self, amount: f32) {
+        let a = amount.clamp(0.0, 1.0);
+        let decay = 0.990 + 0.0085 * a;
+        for c in &mut self.courses {
+            for s in &mut c.strings {
+                s.decay = decay;
+            }
+        }
+    }
+
+    /// Stereo spread of the course field (0 = mono, 1 = wide).
+    pub fn set_width(&mut self, amount: f32) {
+        self.width = amount.clamp(0.0, 1.0);
+    }
+
+    /// Per-note humanization (0 = mechanical, 1 = loose). Pitch-neutral.
+    pub fn set_humanize(&mut self, amount: f32) {
+        for c in &mut self.courses {
+            for s in &mut c.strings {
+                s.set_humanize(amount);
+            }
+        }
+    }
+
+    /// Whether any course is still ringing.
+    pub fn active(&self) -> bool {
+        self.courses.iter().any(|c| c.active())
+    }
+
+    /// One stereo sample. Courses are laid across the field; the skin-membrane
+    /// top colours their sum.
+    #[inline]
+    pub fn process(&mut self) -> (f32, f32) {
+        let n = self.courses.len();
+        let mut mono = 0.0;
+        let mut l = 0.0;
+        let mut r = 0.0;
+        for (i, c) in self.courses.iter_mut().enumerate() {
+            let mut cx = 0.0;
+            for s in &mut c.strings {
+                cx += s.tick();
+            }
+            mono += cx;
+            let pos = if n > 1 { i as f32 / (n - 1) as f32 - 0.5 } else { 0.0 };
+            let pan = pos * self.width;
+            l += cx * (0.5 - pan);
+            r += cx * (0.5 + pan);
+        }
+        let mut b = 0.0;
+        for res in &mut self.body {
+            b += res.tick(mono);
+        }
+        let body = self.body_mix * b;
+        let g = 1.5 / mathf::sqrt((n * TAR_STRINGS_PER_COURSE) as f32);
+        ((l + body) * g, (r + body) * g)
+    }
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
@@ -1252,6 +1421,46 @@ mod tests {
             swing_on > swing_off + 2.0,
             "vibrato did not modulate pitch: off {swing_off:.2} Hz, on {swing_on:.2} Hz"
         );
+    }
+
+    #[test]
+    fn tar_plucks_ring_and_decay_in_tune() {
+        let fs = 48_000.0;
+        let mut t = Tar::new(fs);
+        t.set_brightness(0.6);
+        t.set_sustain(0.7);
+        for &hz in &[220.0f32, 246.94, 293.66, 329.63] {
+            t.pluck(hz, 0.85);
+            for _ in 0..6_000 {
+                let (l, r) = t.process();
+                assert!(l.is_finite() && r.is_finite(), "non-finite");
+            }
+        }
+        let mut peak = 0.0f32;
+        for _ in 0..4_000 {
+            let (l, r) = t.process();
+            peak = peak.max(l.abs()).max(r.abs());
+        }
+        assert!(peak > 0.01, "too quiet: {peak}");
+        for _ in 0..fs as usize * 6 {
+            t.process();
+        }
+        let mut tail = 0.0f32;
+        for _ in 0..4_800 {
+            let (l, r) = t.process();
+            tail = tail.max(l.abs()).max(r.abs());
+        }
+        assert!(tail < peak, "did not decay: tail {tail} vs peak {peak}");
+
+        // A single course lands in tune (humanize off for a clean measurement).
+        let mut t = Tar::with_courses(fs, 1);
+        t.set_sustain(1.0);
+        t.set_chorus(0.0);
+        t.set_humanize(0.0);
+        t.pluck(220.0, 1.0);
+        let buf: Vec<f32> = (0..24_000).map(|_| t.process().0).collect();
+        let cents = partial_cents(&buf, fs, 220.0, 1);
+        assert!(cents.abs() < 2.0, "tar off by {cents:.2} cents");
     }
 
     #[test]
