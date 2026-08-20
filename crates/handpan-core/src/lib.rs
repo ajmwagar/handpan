@@ -407,6 +407,10 @@ impl HandpanEnsemble {
     pub fn set_coupling(&mut self, amount: f32) {
         self.section.for_each_voice(|v, _| v.pan.set_coupling(amount));
     }
+    /// Shared-shell nonlinearity (cross-note intermodulation), section-wide.
+    pub fn set_shell(&mut self, amount: f32) {
+        self.section.for_each_voice(|v, _| v.pan.set_shell_nonlin(amount));
+    }
     /// One stereo sample of the whole section.
     #[inline]
     pub fn process(&mut self) -> (f32, f32) {

@@ -571,6 +571,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "puget-macro"
+version = "0.1.0"
+dependencies = [
+ "bowed-core",
+ "handpan-core",
+ "libm",
+ "mallet-core",
+ "plucked-core",
+ "puget-dsp",
+ "wind-core",
+]
+
+[[package]]
 name = "puremp3"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,60 @@
+# The universal Macro Engine + Expander Bus: one small set of CV-first macros
+# mapped onto every instrument family. Dependency-free (internal workspace crates
+# + optional libm only); each family adapter is feature-gated so firmware for one
+# module compiles only its own family.
+#
+# Proprietary. Copyright (c) 2026 Avery Wagar. All rights reserved.
+[package]
+name = "puget-macro"
+version = "0.1.0"
+edition = "2021"
+authors = ["Avery Wagar"]
+description = "Universal macro engine + expander bus: CV-first universal macros (Timbre/Dynamics/Motion/Articulation/Chairs/Spread/Width) mapped onto every Puget instrument family"
+license-file = "../../LICENSE"
+publish = false
+
+[features]
+# Host builds (plugins, tests, WAV rendering): libstd math. Every family on by
+# default so `cargo test` covers the whole mapping.
+default = ["std", "handpan", "wind", "bowed", "mallet", "plucked"]
+# Enable/disable std across whichever family crates are compiled in. The `?`
+# makes it a no-op when the family isn't enabled — so a firmware build that only
+# turns on one family doesn't drag in the others.
+std = [
+    "puget-dsp/std",
+    "handpan-core?/std",
+    "wind-core?/std",
+    "bowed-core?/std",
+    "mallet-core?/std",
+    "plucked-core?/std",
+]
+# Embedded / firmware builds: no_std + transcendentals via libm.
+# e.g. `cargo build -p puget-macro --no-default-features --features libm,handpan`.
+libm = [
+    "dep:libm",
+    "puget-dsp/libm",
+    "handpan-core?/libm",
+    "wind-core?/libm",
+    "bowed-core?/libm",
+    "mallet-core?/libm",
+    "plucked-core?/libm",
+]
+
+# One feature per family adapter. Turning a family on pulls in only that core, so
+# a Daisy build for a wind module never compiles the handpan/bowed/mallet code.
+handpan = ["dep:handpan-core"]
+wind = ["dep:wind-core"]
+bowed = ["dep:bowed-core"]
+mallet = ["dep:mallet-core"]
+plucked = ["dep:plucked-core"]
+
+[dependencies]
+# libm supplies the transcendentals on no_std firmware; host builds stay free of
+# third-party code. Only internal workspace crates otherwise.
+libm = { version = "0.2", optional = true }
+puget-dsp = { path = "../puget-dsp", default-features = false }
+handpan-core = { path = "../handpan-core", optional = true, default-features = false }
+wind-core = { path = "../wind-core", optional = true, default-features = false }
+bowed-core = { path = "../bowed-core", optional = true, default-features = false }
+mallet-core = { path = "../mallet-core", optional = true, default-features = false }
+plucked-core = { path = "../plucked-core", optional = true, default-features = false }
