@@ -231,6 +231,16 @@ impl StringKind {
             StringKind::Kamancheh => 1.0, // unused (kamancheh has its own table)
         }
     }
+    /// String-loop DC gain (< 1). Sets how long the string rings down once the
+    /// bow lifts: closer to 1 = a longer, more singing tail. The kamancheh's
+    /// light strings on a resonant skin body ring on noticeably longer than the
+    /// heavily-damped orchestral strings.
+    fn loop_gain(self) -> f32 {
+        match self {
+            StringKind::Kamancheh => 0.972,
+            _ => 0.95,
+        }
+    }
 }
 
 /// The resonant body: a modal bank tuned to measured violin body resonances
@@ -343,6 +353,15 @@ struct BowString {
     // Bow control (slewed so attacks/releases aren't clicks).
     max_vel_target: f32,
     vel_env: f32,
+    /// Bow-string contact (1 = bow on the string, 0 = lifted off). Rises fast on
+    /// attack, falls at `release_slew` on note-off; the friction coupling is
+    /// scaled by it, so a lifted bow leaves the string to ring down *freely*
+    /// (at just the loop loss) instead of staying in contact and damping it dry.
+    contact: f32,
+    /// Bow-force slew when releasing (target below the current level) — slower
+    /// than the attack so a lifted bow tapers into the ring-down instead of
+    /// cutting off dry.
+    release_slew: f32,
     slope: f32,
     // Friction-slope endpoints (full-pressure, zero-pressure) for this kind.
     slope_lo: f32,
@@ -370,11 +389,13 @@ impl BowString {
             fs,
             neck: Delay::new(max),
             bridge: Delay::new(max),
-            string_filter: OnePole::new(pole, 0.95),
+            string_filter: OnePole::new(pole, kind.loop_gain()),
             bow_pos,
             base_delay: 100.0,
             max_vel_target: 0.0,
             vel_env: 0.0,
+            contact: 0.0,
+            release_slew: 0.0011, // ~20 ms: a graceful bow lift
             slope: 3.0,
             slope_lo,
             slope_hi,
@@ -415,6 +436,7 @@ impl BowString {
     fn note_on(&mut self, freq: f32, bow_velocity: f32, bow_pressure: f32) {
         self.set_freq(freq);
         self.set_bow(bow_velocity, bow_pressure);
+        self.contact = 1.0; // the bow is already on the string
         self.attack = (0.03 * self.fs) as u32; // ~30 ms onset scratch
     }
 
@@ -464,7 +486,15 @@ impl BowString {
     /// One sample of the raw bridge signal (pre-body).
     #[inline]
     fn tick_raw(&mut self) -> f32 {
-        self.vel_env += 0.0025 * (self.max_vel_target - self.vel_env);
+        // Faster to reach a louder bow (crisp attack), slower to fall away (a
+        // graceful release into the ring-down, so notes don't cut off dry).
+        let slew = if self.max_vel_target < self.vel_env { self.release_slew } else { 0.0025 };
+        self.vel_env += slew * (self.max_vel_target - self.vel_env);
+        // Bow-string contact: fast to land on the string, slow to lift off. When
+        // the bow lifts (target 0) this fades to 0 and the string rings freely.
+        let contact_target = if self.max_vel_target > 0.0 { 1.0 } else { 0.0 };
+        let contact_rate = if contact_target > self.contact { 0.01 } else { self.release_slew };
+        self.contact += contact_rate * (contact_target - self.contact);
 
         if self.vib_depth > 0.0 {
             self.vib_phase += core::f32::consts::TAU * self.vib_rate / self.fs;
@@ -499,7 +529,10 @@ impl BowString {
         let nut_refl = -self.neck.last_out();
         let string_vel = bridge_refl + nut_refl;
         let delta = (self.vel_env + noise) - string_vel;
-        let new_vel = delta * bow_friction(delta, self.slope);
+        // Scale the friction interaction by bow contact: at full contact this is
+        // the normal bowed drive; as the bow lifts, it fades to 0 and the loop
+        // reflects freely, so the string rings down (not damped by a resting bow).
+        let new_vel = delta * bow_friction(delta, self.slope) * self.contact;
         self.neck.tick(bridge_refl + new_vel);
         self.bridge.tick(nut_refl + new_vel);
         self.bridge.last_out()

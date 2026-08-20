@@ -38,7 +38,7 @@ fn main() -> std::io::Result<()> {
         (5.0, 1.5, 0.8, 0.05),   // long, singing, wide vibrato
     ];
 
-    let note_gap = 0.86; // bow most of the note, lift for a short tail
+    let note_gap = 0.80; // lift the bow a little earlier so each note rings out
     for &(semi, len, bv, vib) in phrase {
         let hz = q.quantize_volts(semi / 12.0);
         k.set_vibrato(5.5, vib);
