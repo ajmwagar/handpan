@@ -149,7 +149,13 @@ struct PluckString {
     /// Noise-burst excitation state.
     rng: u32,
     exc_rem: u32,
+    /// Length of the current excitation burst (for the attack fade-in).
+    exc_len: u32,
     exc_amp: f32,
+    /// Per-note humanization (0 = mechanical, 1 = loose): subtle velocity and
+    /// onset-timing jitter so repeated notes aren't identical. Pitch-neutral —
+    /// it never detunes the string.
+    humanize: f32,
     /// Pluck-position comb: a short delay whose output is subtracted from the
     /// excitation, plus its depth (0 = off).
     comb: Delay,
@@ -195,7 +201,9 @@ impl PluckString {
             sat: 0.0,
             rng: 0x9E37_79B9 ^ seed,
             exc_rem: 0,
+            exc_len: 1,
             exc_amp: 0.0,
+            humanize: 0.25,
             comb: Delay::new(max),
             comb_amt: 0.0,
             ext_in: 0.0,
@@ -282,11 +290,31 @@ impl PluckString {
         self.ext_in += x;
     }
 
-    /// Delay the start of the pending excitation burst by `samples` (a per-string
-    /// strike micro-timing offset).
+    /// Add to the delay before the pending excitation burst begins (a per-string
+    /// strike micro-timing offset). Additive so it composes with any humanization
+    /// jitter already applied at pluck/strike time.
     #[inline]
     fn set_onset(&mut self, samples: u32) {
-        self.onset = samples;
+        self.onset = self.onset.saturating_add(samples);
+    }
+    /// Per-note humanization amount (0 = mechanical, 1 = loose).
+    #[inline]
+    fn set_humanize(&mut self, amount: f32) {
+        self.humanize = amount.clamp(0.0, 1.0);
+    }
+    /// Apply humanization to a note's velocity + onset. Velocity gets a small
+    /// random trim; the onset a small random delay. Never touches pitch, so the
+    /// string stays exactly in tune.
+    #[inline]
+    fn humanize_note(&mut self, velocity: f32) -> f32 {
+        self.onset = 0;
+        let mut v = velocity.clamp(0.0, 1.0);
+        if self.humanize > 0.0 {
+            v = (v * (1.0 + 0.10 * self.humanize * self.white())).clamp(0.0, 1.0);
+            let u = self.white() * 0.5 + 0.5; // 0..1
+            self.onset = (self.humanize * 0.004 * self.fs * u) as u32;
+        }
+        v
     }
     /// Pluck: excite the loop with a comb-shaped noise burst ~one period long.
     fn pluck(&mut self, freq: f32, velocity: f32) {
@@ -294,12 +322,15 @@ impl PluckString {
         self.set_freq(self.base_hz);
         let period = self.fs / self.base_hz;
         self.exc_rem = period as u32;
-        self.exc_amp = velocity.clamp(0.0, 1.0);
+        self.exc_len = self.exc_rem.max(1);
+        let v = self.humanize_note(velocity);
+        self.exc_amp = v;
         // Pluck a fraction β along the string → comb notch every 1/β harmonics.
-        // β ≈ 0.13 (near the bridge) gives the bright, slightly hollow lute tone.
+        // β ≈ 0.13 (near the bridge) gives the bright lute tone; the comb depth
+        // is kept moderate so the pluck reads warm rather than hollow/nasal.
         self.comb.set_delay((0.13 * period).max(1.0));
-        self.comb_amt = 0.9;
-        self.vel_bright = self.exc_amp;
+        self.comb_amt = 0.75;
+        self.vel_bright = v;
     }
     /// Strike: a hard, light mallet (santur mezrab) hitting the string. Unlike a
     /// pluck it's a sharp, short contact near the bridge — a brief brilliant
@@ -311,11 +342,14 @@ impl PluckString {
         let period = self.fs / self.base_hz;
         // Short contact: a fraction of a period, so the burst is impulsive.
         self.exc_rem = (period * 0.45).max(2.0) as u32;
-        self.exc_amp = velocity.clamp(0.0, 1.0);
-        // Struck close to the bridge → a bright comb (notches high up).
+        self.exc_len = self.exc_rem.max(1);
+        let v = self.humanize_note(velocity);
+        self.exc_amp = v;
+        // Struck close to the bridge → a bright comb, but eased so the mezrab
+        // reads as a woody tap rather than a sharp click.
         self.comb.set_delay((0.09 * period).max(1.0));
-        self.comb_amt = 0.7;
-        self.vel_bright = self.exc_amp;
+        self.comb_amt = 0.58;
+        self.vel_bright = v;
     }
     /// True when any per-sample pitch modulation is in flight.
     #[inline]
@@ -346,8 +380,9 @@ impl PluckString {
             self.set_freq(eff);
         }
         // Loop loss filter (one-pole low-pass). A harder pluck opens it briefly,
-        // injecting extra HF the way a real hard pluck does.
-        let damp = (self.damp * (1.0 - 0.45 * self.vel_bright)).clamp(0.0, 0.995);
+        // injecting extra HF the way a real hard pluck does — kept gentle so the
+        // attack stays round rather than zingy.
+        let damp = (self.damp * (1.0 - 0.30 * self.vel_bright)).clamp(0.0, 0.995);
         self.vel_bright *= 0.9994;
         self.lp_y1 = (1.0 - damp) * s + damp * self.lp_y1;
         let mut fed = self.decay * self.lp_y1;
@@ -366,7 +401,16 @@ impl PluckString {
             0.0
         } else if self.exc_rem > 0 {
             self.exc_rem -= 1;
-            let n = self.white() * self.exc_amp;
+            // Raised-cosine fade-in over the first ~1.2 ms of the burst so the
+            // note starts rounded, not as a hard transient click.
+            let done = self.exc_len.saturating_sub(self.exc_rem);
+            let ramp = ((0.0012 * self.fs) as u32).max(1);
+            let env = if done < ramp {
+                0.5 - 0.5 * mathf::cos(core::f32::consts::PI * done as f32 / ramp as f32)
+            } else {
+                1.0
+            };
+            let n = self.white() * self.exc_amp * env;
             n - self.comb_amt * self.comb.tick(n)
         } else {
             0.0
@@ -405,7 +449,7 @@ impl Cifteli {
             // A small, bright boxy wooden body.
             body: [Reso::new(430.0, 12.0, 0.8, fs), Reso::new(1150.0, 9.0, 0.5, fs)],
             drone_hz: 196.0,
-            body_mix: 0.12,
+            body_mix: 0.15,
             // Light sympathetic halo: enough to set the drone ringing when the
             // melody is plucked, gentle enough never to run away.
             couple: 0.02,
@@ -451,6 +495,13 @@ impl Cifteli {
         let decay = 0.985 + 0.0145 * a;
         self.drone.decay = decay;
         self.melody.decay = decay;
+    }
+
+    /// Per-note humanization (0 = mechanical, 1 = loose): velocity + micro-timing
+    /// variation so repeated notes breathe. Pitch is never affected.
+    pub fn set_humanize(&mut self, amount: f32) {
+        self.drone.set_humanize(amount);
+        self.melody.set_humanize(amount);
     }
 
     /// Whether anything is still ringing.
@@ -612,6 +663,13 @@ impl Gayageum {
         self.width = amount.clamp(0.0, 1.0);
     }
 
+    /// Per-note humanization (0 = mechanical, 1 = loose). Pitch-neutral.
+    pub fn set_humanize(&mut self, amount: f32) {
+        for s in &mut self.strings {
+            s.set_humanize(amount);
+        }
+    }
+
     /// Whether any string is still ringing.
     pub fn active(&self) -> bool {
         self.strings.iter().any(|s| s.active())
@@ -686,14 +744,17 @@ impl Basitar {
             // partial above it is stretched sharp, like a real wound low string.
             s.damp = 0.38;
             s.decay = 0.978;
-            s.set_dispersion(0.85, 450.0, 2);
+            // Dispersion at ~450 Hz stretches the high partials sharp for the
+            // clank — eased to 0.72 so it reads as heavy-string character rather
+            // than an aggressive metallic edge.
+            s.set_dispersion(0.72, 450.0, 2);
             s.sat = 0.0; // grind lives in the amp stage, not the string loop
         }
         Basitar {
             low,
             high,
             interval: 7.0,
-            drive: 0.25,
+            drive: 0.20,
             presence: Reso::new(2400.0, 2.2, 0.5, fs),
             amp_lp: 0.0,
             // ~4.5 kHz amp roll-off.
@@ -725,13 +786,20 @@ impl Basitar {
         let hz = hz.max(1.0);
         self.low.pluck(hz, velocity);
         self.high.pluck(hz * mathf::exp2(self.interval / 12.0), velocity * 0.95);
-        // Offset the high string's excitation slightly (pick sweep).
-        self.high.exc_rem = self.high.exc_rem.saturating_add((0.0015 * self.high.fs) as u32);
+        // Delay the high string's onset slightly — the pick sweeping across the
+        // two strings (composes with any humanization offset).
+        self.high.set_onset((0.0015 * self.high.fs) as u32);
     }
 
     /// Amp grind: 0 = clean, 1 = heavily overdriven.
     pub fn set_drive(&mut self, amount: f32) {
         self.drive = amount.clamp(0.0, 1.0);
+    }
+
+    /// Per-note humanization (0 = mechanical, 1 = loose). Pitch-neutral.
+    pub fn set_humanize(&mut self, amount: f32) {
+        self.low.set_humanize(amount);
+        self.high.set_humanize(amount);
     }
 
     /// Brightness of both strings: 0 = dark/dubby, 1 = bright and clanky.
@@ -812,10 +880,12 @@ impl Course {
         // Distinct seeds so the noise bursts (and thus the beating) decorrelate.
         let strings = core::array::from_fn(|k| {
             let mut s = PluckString::new(fs, seed ^ (0x2971u32.wrapping_mul(k as u32 + 1)));
-            // Bright steel strings with a long, ringing shimmer and a touch of
+            // Steel strings with a long, ringing shimmer and a touch of
             // stiffness (the santur's high courses are audibly inharmonic, and
             // steel reads bright — partials pulled a hair sharp, not flat).
-            s.damp = 0.30;
+            // damp eased a little from the brightest setting so the struck tone
+            // is warm and shimmering rather than glassy/intense.
+            s.damp = 0.34;
             s.set_dispersion(0.72, 1500.0, 1);
             s
         });
@@ -878,7 +948,7 @@ impl Santur {
                 Reso::new(560.0, 9.0, 0.5, fs),
                 Reso::new(1600.0, 6.0, 0.3, fs),
             ],
-            body_mix: 0.14,
+            body_mix: 0.17,
             next: 0,
             detune_cents: 5.0,
             width: 0.4,
@@ -933,6 +1003,16 @@ impl Santur {
     /// Stereo spread of the soundboard field (0 = mono, 1 = wide).
     pub fn set_width(&mut self, amount: f32) {
         self.width = amount.clamp(0.0, 1.0);
+    }
+
+    /// Per-note humanization (0 = mechanical, 1 = loose): velocity + micro-timing
+    /// variation on top of the course's built-in string stagger. Pitch-neutral.
+    pub fn set_humanize(&mut self, amount: f32) {
+        for c in &mut self.courses {
+            for s in &mut c.strings {
+                s.set_humanize(amount);
+            }
+        }
     }
 
     /// Whether any course is still ringing.
@@ -1053,6 +1133,7 @@ mod tests {
         let fs = 48_000.0;
         let mut c = Cifteli::new(fs);
         c.set_sustain(1.0);
+        c.set_humanize(0.0); // measure the nominal pitch, not the humanized jitter
         c.pluck_melody(220.0, 1.0);
         let buf: Vec<f32> = (0..24_000).map(|_| c.process().0).collect();
         let cents = partial_cents(&buf, fs, 220.0, 1);
@@ -1068,6 +1149,7 @@ mod tests {
         let mut g = Gayageum::with_voices(fs, 1);
         g.set_sustain(1.0);
         g.set_vibrato(0.0, 0.0);
+        g.set_humanize(0.0); // measure nominal pitch (humanize is pitch-neutral)
         g.pluck(220.0, 1.0);
         let gb: Vec<f32> = (0..24_000).map(|_| g.process().0).collect();
         let gc = partial_cents(&gb, fs, 220.0, 1);
@@ -1076,6 +1158,7 @@ mod tests {
         let mut b = Basitar::new(fs);
         b.set_drive(0.0);
         b.set_sustain(1.0);
+        b.set_humanize(0.0);
         b.pluck_low(110.0, 1.0);
         let bb: Vec<f32> = (0..24_000).map(|_| b.process().0).collect();
         let bc = partial_cents(&bb, fs, 110.0, 1);
@@ -1084,6 +1167,7 @@ mod tests {
         let mut s = Santur::with_courses(fs, 1);
         s.set_sustain(1.0);
         s.set_shimmer(0.0);
+        s.set_humanize(0.0);
         s.strike(220.0, 1.0);
         let sb: Vec<f32> = (0..24_000).map(|_| s.process().0).collect();
         let sc = partial_cents(&sb, fs, 220.0, 1);
@@ -1210,6 +1294,7 @@ mod tests {
         let mut s = Santur::with_courses(fs, 1);
         s.set_sustain(1.0);
         s.set_shimmer(0.0);
+        s.set_humanize(0.0);
         s.strike(220.0, 1.0);
         let buf: Vec<f32> = (0..24_000).map(|_| s.process().0).collect();
         let cents = partial_cents(&buf, fs, 220.0, 1);
@@ -1226,6 +1311,7 @@ mod tests {
         b.set_drive(0.0);
         b.set_sustain(1.0);
         b.set_brightness(0.7);
+        b.set_humanize(0.0);
         b.pluck_low(110.0, 1.0);
         let buf: Vec<f32> = (0..40_000).map(|_| b.process().0).collect();
         let c1 = partial_cents(&buf, fs, 110.0, 1);
@@ -1233,14 +1319,16 @@ mod tests {
         let c8 = partial_cents(&buf, fs, 110.0, 8);
         let c12 = partial_cents(&buf, fs, 110.0, 12);
         assert!(c1.abs() < 2.0, "fundamental not in tune: {c1:.2} cents");
-        // Partials climb sharp with harmonic number.
+        // Partials climb sharp with harmonic number — the heavy-string clank.
+        // (Eased from the most aggressive dispersion for a warmer voice, but the
+        // stretch is still clearly audible and monotone.)
         assert!(
-            c12 - c1 > 12.0,
+            c12 - c1 > 4.0,
             "partial 12 not sharp enough: stretch {:.1} cents (p1 {c1:.1}, p12 {c12:.1})",
             c12 - c1
         );
         assert!(
-            c8 - c1 > 6.0,
+            c8 - c1 > 2.0,
             "partial 8 not sharp enough: stretch {:.1} cents (p1 {c1:.1}, p8 {c8:.1})",
             c8 - c1
         );
