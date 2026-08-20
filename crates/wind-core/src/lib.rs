@@ -263,6 +263,24 @@ pub struct Wind {
 
     // Bell-radiation even-harmonic term (DC-tracked) + output DC blocker.
     even_dc: f32,
+    // Sax even generator: the squared even term is fed from a fundamental-biased
+    // (low-passed) copy of the loop output, so it radiates a clean 2nd harmonic
+    // (h1²) instead of a mush of h1·h3 / h3² cross-products. The fixed ~800 Hz
+    // cutoff makes low notes fuller (more sub-cutoff evens) and high notes purer
+    // — the real conical-bore/tonehole trend. `even_lp_c` is the one-pole coeff.
+    even_lp: f32,
+    even_lp_c: f32,
+    // Sax body resonance: a fixed low-mid formant (~330 Hz) giving the tone a
+    // woodwind body rather than a bare filtered reed. Applied only for the sax.
+    body: Peaking,
+    // Sax "bloom": a level/harmonic envelope that opens the note over ~150 ms
+    // after the chiff (0 → 1). Starts the note slightly darker/softer.
+    bloom: f32,
+    bloom_c: f32,
+    // Sax growl (expression, off by default): a slow sub-audio amplitude flutter.
+    growl_depth: f32,
+    growl_rate: f32,
+    growl_phase: f32,
     dc_x1: f32,
     dc_y1: f32,
 
@@ -307,8 +325,10 @@ impl Wind {
             // register (lighter overblows to the octave or squeals).
             WindKind::Flute => (0.95, 0.60),
             // Sax: the clarinet's INVERTING single-reed loop — stable and
-            // fundamental-strong (no octave overblow); brighter/reedier.
-            WindKind::Saxophone => (0.95, 0.4),
+            // fundamental-strong (no octave overblow). Darker loop damp (0.57)
+            // than a bright reed so the odd h3/h5 leakage drops and the radiated
+            // 2nd harmonic can dominate, as on a real alto.
+            WindKind::Saxophone => (0.95, 0.57),
             // Didgeridoo: the clarinet reed loop (fundamental-strong). Very high
             // loop gain so the very low drone self-sustains robustly (the reed
             // clips and self-limits, so it can't run away); bright/buzzy so the
@@ -413,6 +433,22 @@ impl Wind {
             breath_cv: None,
             breath_mod_depth: 0.045,
             even_dc: 0.0,
+            even_lp: 0.0,
+            // ~800 Hz one-pole: passes the fundamental strongly, tapers the
+            // upper harmonics out of the squared even source.
+            even_lp_c: 1.0 - mathf::exp(-core::f32::consts::TAU * 800.0 / fs),
+            // Body formant: a low-mid resonance for woodwind warmth (sax only;
+            // transparent 0 dB for the other voices so the slot is a no-op).
+            body: match kind {
+                WindKind::Saxophone => Peaking::new(330.0, 0.9, 5.0, fs),
+                _ => Peaking::new(330.0, 1.0, 0.0, fs),
+            },
+            bloom: 1.0,
+            // ~150 ms opening time constant.
+            bloom_c: 1.0 - mathf::exp(-core::f32::consts::TAU * 1.1 / fs),
+            growl_depth: 0.0,
+            growl_rate: 5.5,
+            growl_phase: 0.0,
             dc_x1: 0.0,
             dc_y1: 0.0,
             // Radiation low-pass cutoff: clarinet ~9 kHz (near-transparent, the
@@ -508,6 +544,18 @@ impl Wind {
         };
         self.onset_len = (ms * self.fs).max(1.0);
         self.onset = self.onset_len as u32;
+        // Sax bloom starts closed and opens over the first ~150 ms.
+        if self.kind == WindKind::Saxophone {
+            self.bloom = 0.0;
+        }
+    }
+
+    /// Sax growl (expression): a gentle sub-audio amplitude flutter. `depth`
+    /// 0 = off (default); ~0.05–0.2 is a subtle-to-throaty growl. `rate_hz` is
+    /// the flutter speed (~5–8 Hz is a natural growl).
+    pub fn set_growl(&mut self, depth: f32, rate_hz: f32) {
+        self.growl_depth = depth.clamp(0.0, 0.5);
+        self.growl_rate = rate_hz.max(0.0);
     }
 
     /// Stop blowing — the tone dies quickly (winds have little sustain tail).
@@ -588,8 +636,9 @@ impl Wind {
             WindKind::Clarinet => 0.88 - 0.23 * a,
             // Narrow swing around 0.60 — a wide swing destabilizes the jet.
             WindKind::Flute => 0.64 - 0.08 * a,
-            // Reedy: brighter than the clarinet, around the honk formant.
-            WindKind::Saxophone => 0.50 - 0.25 * a,
+            // Reedy but kept darker than before so h2 stays dominant over the
+            // odd stack; the swing still opens toward a buzzier embouchure.
+            WindKind::Saxophone => 0.66 - 0.18 * a,
             // Moves the bell cutoff (brighter = higher cutoff = smaller g).
             WindKind::Trumpet => 0.87 - 0.10 * a,
             WindKind::Didgeridoo => 0.55,
@@ -621,6 +670,10 @@ impl Wind {
             self.release_rate
         };
         self.breath_env += rate * (self.breath_target - self.breath_env);
+
+        // Sax bloom: rises 0 → 1 over ~150 ms after the attack — the note opens
+        // up (level + even-harmonic body) once the chiff settles.
+        self.bloom += self.bloom_c * (1.0 - self.bloom);
 
         // Organic breath movement: two slow incommensurate LFOs (~0.7 & ~2.3 Hz)
         // plus a slow random walk — the constant micro-fluctuation of a real
@@ -729,14 +782,36 @@ impl Wind {
         // hollow reed tone into a full, all-harmonic saxophone).
         let even_amt = match self.kind {
             WindKind::Clarinet => 0.09,
-            WindKind::Saxophone => 1.4,
+            WindKind::Saxophone => 2.6,
             WindKind::Didgeridoo => 0.5, // fill the buzzy all-harmonic drone
             _ => 0.0,
         };
         if even_amt > 0.0 {
-            let sq = out * out;
+            // Sax: square a fundamental-biased (low-passed) copy so the even
+            // term is a clean 2nd harmonic (h1²) rather than a fizzy mush of
+            // h1·h3 / h3² cross-products; the bloom opens it over the onset.
+            let (src, amt) = if matches!(self.kind, WindKind::Saxophone) {
+                self.even_lp += self.even_lp_c * (out - self.even_lp);
+                (self.even_lp, even_amt * (0.55 + 0.45 * self.bloom))
+            } else {
+                (out, even_amt)
+            };
+            let sq = src * src;
             self.even_dc += 0.0008 * (sq - self.even_dc);
-            out += even_amt * (sq - self.even_dc);
+            out += amt * (sq - self.even_dc);
+        }
+
+        // Sax body resonance: a fixed low-mid formant for woodwind warmth.
+        if matches!(self.kind, WindKind::Saxophone) {
+            out = self.body.tick(out);
+            // Growl (expression): a gentle sub-audio amplitude flutter.
+            if self.growl_depth > 0.0 {
+                self.growl_phase += core::f32::consts::TAU * self.growl_rate / self.fs;
+                if self.growl_phase > core::f32::consts::TAU {
+                    self.growl_phase -= core::f32::consts::TAU;
+                }
+                out *= 1.0 + self.growl_depth * mathf::sin(self.growl_phase);
+            }
         }
 
         // Didgeridoo vocal-tract formant: a resonant band-pass (state-variable)
@@ -774,7 +849,13 @@ impl Wind {
         // upper-harmonic roll-off.
         self.out_lp = (1.0 - self.out_pole) * r + self.out_pole * self.out_lp;
         self.out_lp2 = (1.0 - self.out_pole) * self.out_lp + self.out_pole * self.out_lp2;
-        self.out_lp2 * self.out_gain
+        // Sax level bloom: the note swells slightly as it opens (subtle).
+        let bloom_gain = if matches!(self.kind, WindKind::Saxophone) {
+            0.9 + 0.1 * self.bloom
+        } else {
+            1.0
+        };
+        self.out_lp2 * self.out_gain * bloom_gain
     }
 }
 
@@ -849,6 +930,10 @@ impl WindEnsemble {
     /// Breath-mod CV (normalled to each chair's LFO), section-wide.
     pub fn set_breath_mod(&mut self, cv: Option<f32>) {
         self.section.for_each_voice(|v, _| v.set_breath_mod(cv));
+    }
+    /// Sax growl (expression, off by default), section-wide.
+    pub fn set_growl(&mut self, depth: f32, rate_hz: f32) {
+        self.section.for_each_voice(|v, _| v.set_growl(depth, rate_hz));
     }
     /// One stereo sample of the whole section.
     #[inline]
