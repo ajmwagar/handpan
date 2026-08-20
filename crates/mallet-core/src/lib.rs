@@ -26,7 +26,7 @@ use puget_dsp::mathf;
 use puget_dsp::Ensemble;
 mod resonator;
 
-use resonator::Resonator;
+use resonator::{BandPass, Resonator};
 
 /// One partial: frequency ratio to the fundamental, linear gain, decay×.
 #[derive(Clone, Copy)]
@@ -50,6 +50,13 @@ pub struct Timbre {
     /// Amplitude tremolo (0 = off) — the vibraphone's motor.
     pub tremolo_hz: f32,
     pub tremolo_depth: f32,
+    /// Tuned-tube resonance: dry/wet mix (0 = off) of a fundamental-tuned
+    /// bandpass. Marimba/vibe bars sit over tubes that emphasise the
+    /// fundamental and add a hollow "hoot"; kept subtle so it deepens the body
+    /// without muddying the attack or shifting perceived pitch.
+    pub tube_mix: f32,
+    /// Quality (narrowness) of the tuned-tube bandpass.
+    pub tube_q: f32,
 }
 
 const fn m(ratio: f32, gain: f32, decay: f32) -> ModeSpec {
@@ -114,14 +121,16 @@ pub enum Instrument {
 impl Instrument {
     pub fn timbre(self) -> Timbre {
         match self {
-            Instrument::Marimba => Timbre { modes: MARIMBA, base_t60: 0.55, decay_pitch: 0.85, mallet_cutoff: 2200.0, attack_ms: 1.5, level: 1.0, tremolo_hz: 0.0, tremolo_depth: 0.0 },
-            Instrument::Xylophone => Timbre { modes: XYLOPHONE, base_t60: 0.28, decay_pitch: 1.0, mallet_cutoff: 5500.0, attack_ms: 1.0, level: 1.0, tremolo_hz: 0.0, tremolo_depth: 0.0 },
-            Instrument::Vibraphone => Timbre { modes: VIBRAPHONE, base_t60: 9.0, decay_pitch: 0.35, mallet_cutoff: 3000.0, attack_ms: 2.0, level: 1.0, tremolo_hz: 5.5, tremolo_depth: 0.3 },
-            Instrument::Glockenspiel => Timbre { modes: GLOCKENSPIEL, base_t60: 1.3, decay_pitch: 0.5, mallet_cutoff: 8500.0, attack_ms: 0.8, level: 0.9, tremolo_hz: 0.0, tremolo_depth: 0.0 },
-            Instrument::TubularBell => Timbre { modes: TUBULAR_BELL, base_t60: 3.5, decay_pitch: 0.8, mallet_cutoff: 4000.0, attack_ms: 2.5, level: 1.0, tremolo_hz: 0.0, tremolo_depth: 0.0 },
-            Instrument::ChurchBell => Timbre { modes: CHURCH_BELL, base_t60: 5.0, decay_pitch: 0.9, mallet_cutoff: 3500.0, attack_ms: 3.0, level: 0.9, tremolo_hz: 0.0, tremolo_depth: 0.0 },
-            Instrument::MusicBox => Timbre { modes: MUSIC_BOX, base_t60: 0.6, decay_pitch: 0.6, mallet_cutoff: 9000.0, attack_ms: 0.7, level: 0.7, tremolo_hz: 0.0, tremolo_depth: 0.0 },
-            Instrument::SingingBowl => Timbre { modes: SINGING_BOWL, base_t60: 11.0, decay_pitch: 0.5, mallet_cutoff: 2500.0, attack_ms: 4.0, level: 1.0, tremolo_hz: 0.0, tremolo_depth: 0.0 },
+            // base_t60 raised 0.55 → 0.90: measured marimba C4 fundamental T60
+            // is ~1.4 s; the tuned tube adds the rest of the woody sustain.
+            Instrument::Marimba => Timbre { modes: MARIMBA, base_t60: 0.90, decay_pitch: 0.85, mallet_cutoff: 2200.0, attack_ms: 1.5, level: 1.0, tremolo_hz: 0.0, tremolo_depth: 0.0, tube_mix: 0.20, tube_q: 2.5 },
+            Instrument::Xylophone => Timbre { modes: XYLOPHONE, base_t60: 0.28, decay_pitch: 1.0, mallet_cutoff: 5500.0, attack_ms: 1.0, level: 1.0, tremolo_hz: 0.0, tremolo_depth: 0.0, tube_mix: 0.0, tube_q: 3.0 },
+            Instrument::Vibraphone => Timbre { modes: VIBRAPHONE, base_t60: 9.0, decay_pitch: 0.35, mallet_cutoff: 3000.0, attack_ms: 2.0, level: 1.0, tremolo_hz: 5.5, tremolo_depth: 0.3, tube_mix: 0.15, tube_q: 3.5 },
+            Instrument::Glockenspiel => Timbre { modes: GLOCKENSPIEL, base_t60: 1.3, decay_pitch: 0.5, mallet_cutoff: 8500.0, attack_ms: 0.8, level: 0.9, tremolo_hz: 0.0, tremolo_depth: 0.0, tube_mix: 0.0, tube_q: 3.0 },
+            Instrument::TubularBell => Timbre { modes: TUBULAR_BELL, base_t60: 3.5, decay_pitch: 0.8, mallet_cutoff: 4000.0, attack_ms: 2.5, level: 1.0, tremolo_hz: 0.0, tremolo_depth: 0.0, tube_mix: 0.0, tube_q: 3.0 },
+            Instrument::ChurchBell => Timbre { modes: CHURCH_BELL, base_t60: 5.0, decay_pitch: 0.9, mallet_cutoff: 3500.0, attack_ms: 3.0, level: 0.9, tremolo_hz: 0.0, tremolo_depth: 0.0, tube_mix: 0.0, tube_q: 3.0 },
+            Instrument::MusicBox => Timbre { modes: MUSIC_BOX, base_t60: 0.6, decay_pitch: 0.6, mallet_cutoff: 9000.0, attack_ms: 0.7, level: 0.7, tremolo_hz: 0.0, tremolo_depth: 0.0, tube_mix: 0.0, tube_q: 3.0 },
+            Instrument::SingingBowl => Timbre { modes: SINGING_BOWL, base_t60: 11.0, decay_pitch: 0.5, mallet_cutoff: 2500.0, attack_ms: 4.0, level: 1.0, tremolo_hz: 0.0, tremolo_depth: 0.0, tube_mix: 0.0, tube_q: 3.0 },
         }
     }
 }
@@ -145,12 +154,17 @@ impl Rng {
 
 struct Voice {
     res: Vec<Resonator>,
+    /// Per-mode excitation drive weight — carries the velocity→brightness tilt
+    /// (higher modes driven harder on a hard strike), like the handpan core.
+    drive: Vec<f32>,
     fs: f32,
     exc_rem: u32,
     exc_len: u32,
     exc_amp: f32,
     lp: f32,
     lp_a: f32,
+    tube: BandPass,
+    tube_mix: f32,
     energy: f32,
     pan_l: f32,
     pan_r: f32,
@@ -158,16 +172,25 @@ struct Voice {
     active: bool,
 }
 
+/// How much a hard strike tilts the excitation toward the upper modes. A unit
+/// strike raises the drive of a mode at ratio `r` by `K_BRIGHT·vel·(r−1)`, so a
+/// hard hit injects more HF (a brighter spectrum), a soft hit stays mellow —
+/// the same `exc_vel`-style term the handpan core uses.
+const K_BRIGHT: f32 = 0.18;
+
 impl Voice {
     fn new(n_modes: usize, fs: f32, seed: u32) -> Self {
         Voice {
             res: (0..n_modes).map(|_| Resonator::default()).collect(),
+            drive: (0..n_modes).map(|_| 1.0).collect(),
             fs,
             exc_rem: 0,
             exc_len: 1,
             exc_amp: 0.0,
             lp: 0.0,
             lp_a: 1.0,
+            tube: BandPass::default(),
+            tube_mix: 0.0,
             energy: 0.0,
             pan_l: 0.707,
             pan_r: 0.707,
@@ -177,22 +200,37 @@ impl Voice {
     }
 
     fn strike(&mut self, freq: f32, vel: f32, t: &Timbre) {
+        let vel = vel.clamp(0.0, 1.0);
         let t60 = t.base_t60 * mathf::powf(C4 / freq, t.decay_pitch);
         let t60 = t60.clamp(0.05, 20.0);
         for (i, mode) in t.modes.iter().enumerate() {
             let f = freq * mode.ratio;
             if f < self.fs * 0.49 {
                 self.res[i].set(f, t60 * mode.decay, mode.gain * t.level, self.fs);
+                // Velocity→brightness: drive the upper modes harder on a hard
+                // strike. Fundamental (ratio 1) is unchanged.
+                self.drive[i] = 1.0 + K_BRIGHT * vel * (mode.ratio - 1.0);
             } else {
                 self.res[i].set(0.0, 0.05, 0.0, self.fs); // aliased mode → silent
+                self.drive[i] = 1.0;
             }
+        }
+        // Tuned-tube resonance follows the struck fundamental (subtle body).
+        self.tube_mix = t.tube_mix;
+        if self.tube_mix > 0.0 {
+            self.tube.set(freq, t.tube_q, self.fs);
+            self.tube.reset();
         }
         self.exc_len = ((t.attack_ms * 0.001) * self.fs) as u32;
         self.exc_len = self.exc_len.max(1);
         self.exc_rem = self.exc_len;
-        self.exc_amp = vel.clamp(0.0, 1.0);
+        self.exc_amp = vel;
         self.lp = 0.0;
-        self.lp_a = 1.0 - mathf::exp(-core::f32::consts::TAU * t.mallet_cutoff / self.fs);
+        // Velocity also opens the excitation low-pass: a harder strike is a
+        // harder mallet contact, passing more of the click's HF (0.55×..1.15×
+        // the nominal mallet cutoff across the dynamic range).
+        let cutoff = t.mallet_cutoff * (0.55 + 0.6 * vel);
+        self.lp_a = 1.0 - mathf::exp(-core::f32::consts::TAU * cutoff / self.fs);
         self.energy = vel;
         self.active = true;
         // Pan by pitch: low notes left, high notes right.
@@ -220,11 +258,18 @@ impl Voice {
         self.lp += self.lp_a * (raw - self.lp);
         let exc = self.lp;
         let mut sum = 0.0;
-        for r in &mut self.res {
+        for (i, r) in self.res.iter_mut().enumerate() {
             if damp < 0.9999 {
                 r.damp_state(damp);
             }
-            sum += r.process(exc);
+            // Per-mode velocity brightness tilt (upper modes driven harder).
+            sum += r.process(exc * self.drive[i]);
+        }
+        // Tuned-tube resonance: a gentle fundamental-tuned bandpass mixed in to
+        // deepen the body (marimba/vibe). Wet path peaks at unity, so it only
+        // colours — no runaway — and stays subtle at `tube_mix`.
+        if self.tube_mix > 0.0 {
+            sum += self.tube_mix * self.tube.process(sum);
         }
         // Track energy for voice stealing / deactivation.
         self.energy += 0.002 * (sum.abs() - self.energy);
@@ -233,6 +278,7 @@ impl Voice {
             for r in &mut self.res {
                 r.reset();
             }
+            self.tube.reset();
         }
         sum
     }
@@ -474,6 +520,110 @@ mod tests {
             assert!(peak > 0.001, "{inst:?} silent");
             assert!(peak < 20.0, "{inst:?} runaway: {peak}");
         }
+    }
+
+    /// Spectral centroid (energy-weighted mean frequency) of a render, via a
+    /// coarse DFT over a fixed frequency grid.
+    fn centroid(buf: &[f32], fs: f32) -> f32 {
+        let (fmin, fmax, nb) = (20.0f32, 8000.0f32, 400usize);
+        let (mut num, mut den) = (0.0f64, 0.0f64);
+        for b in 0..nb {
+            let f = fmin + (fmax - fmin) * (b as f32 / (nb - 1) as f32);
+            let w = core::f32::consts::TAU * f / fs;
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            // Decimate by 4 for speed — plenty for a centroid.
+            let mut i = 0;
+            while i < buf.len() {
+                let s = buf[i] as f64;
+                let ph = w as f64 * i as f64;
+                re += s * libm_cos(ph);
+                im += s * libm_sin(ph);
+                i += 4;
+            }
+            let mag = (re * re + im * im).sqrt();
+            num += f as f64 * mag;
+            den += mag;
+        }
+        if den > 0.0 {
+            (num / den) as f32
+        } else {
+            0.0
+        }
+    }
+
+    // std is available in this test cfg, so use it directly for the analysis.
+    fn libm_cos(x: f64) -> f64 {
+        x.cos()
+    }
+    fn libm_sin(x: f64) -> f64 {
+        x.sin()
+    }
+
+    fn strike_centroid(inst: Instrument, midi: f32, vel: f32, fs: f32) -> f32 {
+        let mut m = Mallet::new(fs, inst, 4);
+        m.strike_midi(midi, vel);
+        let n = (0.3 * fs) as usize;
+        let mut buf = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (l, r) = m.process();
+            buf.push((l + r) * 0.5);
+        }
+        centroid(&buf, fs)
+    }
+
+    /// A harder strike must be *brighter*, not just louder: the spectral
+    /// centroid has to rise monotonically with strike velocity. Regression
+    /// guard for the velocity→brightness excitation tilt.
+    #[test]
+    fn harder_strike_is_brighter() {
+        let fs = 48_000.0;
+        for inst in [Instrument::Marimba, Instrument::Vibraphone, Instrument::Glockenspiel] {
+            let vels = [0.2f32, 0.5, 0.8, 1.0];
+            let cs: Vec<f32> = vels.iter().map(|&v| strike_centroid(inst, 60.0, v, fs)).collect();
+            // Monotonic rise across the dynamic range.
+            for w in cs.windows(2) {
+                assert!(
+                    w[1] > w[0] + 1.0,
+                    "{inst:?} centroid not rising with velocity: {cs:?}"
+                );
+            }
+            // And a meaningfully brighter top vs. bottom (not a rounding wiggle).
+            assert!(
+                cs[3] > cs[0] * 1.05,
+                "{inst:?} centroid barely moves 0.2→1.0: {cs:?}"
+            );
+        }
+    }
+
+    /// Pitch must survive the brightness/tube changes: autocorrelation on a
+    /// marimba C4 strike should still land on ~261.6 Hz.
+    #[test]
+    fn pitch_unchanged_by_polish() {
+        let fs = 48_000.0;
+        let mut m = Mallet::new(fs, Instrument::Marimba, 4);
+        m.strike_midi(60.0, 0.9);
+        let n = (0.5 * fs) as usize;
+        let mut buf = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (l, r) = m.process();
+            buf.push((l + r) * 0.5);
+        }
+        let (fmin, fmax) = (150.0f32, 400.0f32);
+        let lag_min = (fs / fmax) as usize;
+        let lag_max = (fs / fmin) as usize;
+        let (mut best, mut best_lag) = (0.0f64, lag_min);
+        for lag in lag_min..lag_max.min(buf.len() - 1) {
+            let mut s = 0.0f64;
+            for i in 0..(buf.len() - lag) {
+                s += buf[i] as f64 * buf[i + lag] as f64;
+            }
+            if s > best {
+                best = s;
+                best_lag = lag;
+            }
+        }
+        let f0 = fs / best_lag as f32;
+        assert!((f0 - 261.626).abs() < 6.0, "marimba pitch drifted: {f0} Hz");
     }
 
     #[test]
