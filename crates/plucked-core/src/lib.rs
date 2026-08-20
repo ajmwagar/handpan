@@ -6,7 +6,9 @@
 //! - the **[`Gayageum`]** — the Korean sanjo zither: a pool of long silk strings
 //!   with a warm paulownia body and deep left-hand *nonghyeon* (vibrato + bends),
 //! - the **[`Basitar`]** — the two-string bass/guitar hybrid: heavy strings
-//!   tuned a fifth apart through a pickup and amp grind (power-chord basslines).
+//!   tuned a fifth apart through a pickup and amp grind (power-chord basslines),
+//! - the **[`Santur`]** — the Persian trapezoidal hammered dulcimer: courses of
+//!   near-unison steel strings *struck* by a mallet into a shimmering chorus.
 //!
 //! Each string is an extended **Karplus-Strong** waveguide — a fractional delay
 //! line closed by a loss/damping filter, excited by a noise burst — upgraded
@@ -176,6 +178,22 @@ impl PluckString {
         // β ≈ 0.13 (near the bridge) gives the bright, slightly hollow lute tone.
         self.comb.set_delay((0.13 * period).max(1.0));
         self.comb_amt = 0.9;
+        self.vel_bright = self.exc_amp;
+    }
+    /// Strike: a hard, light mallet (santur mezrab) hitting the string. Unlike a
+    /// pluck it's a sharp, short contact near the bridge — a brief brilliant
+    /// transient and a bright loop, rather than the slower shaped release of a
+    /// fingered pluck.
+    fn strike(&mut self, freq: f32, velocity: f32) {
+        self.base_hz = freq.max(1.0);
+        self.set_freq(self.base_hz);
+        let period = self.fs / self.base_hz;
+        // Short contact: a fraction of a period, so the burst is impulsive.
+        self.exc_rem = (period * 0.45).max(2.0) as u32;
+        self.exc_amp = velocity.clamp(0.0, 1.0);
+        // Struck close to the bridge → a bright comb (notches high up).
+        self.comb.set_delay((0.09 * period).max(1.0));
+        self.comb_amt = 0.7;
         self.vel_bright = self.exc_amp;
     }
     /// True when any per-sample pitch modulation is in flight.
@@ -608,6 +626,168 @@ impl Basitar {
     }
 }
 
+/// Number of near-unison strings per santur course. Real santurs run 3–4
+/// strings to a note; their slight detuning is what gives the shimmer.
+const SANTUR_STRINGS_PER_COURSE: usize = 3;
+
+/// One santur course: a handful of steel strings tuned to (almost) the same
+/// pitch and struck together. The tiny detuning between them beats, producing
+/// the instrument's signature shimmering chorus.
+struct Course {
+    strings: [PluckString; SANTUR_STRINGS_PER_COURSE],
+}
+impl Course {
+    fn new(fs: f32, seed: u32) -> Self {
+        // Distinct seeds so the noise bursts (and thus the beating) decorrelate.
+        let strings = core::array::from_fn(|k| {
+            let mut s = PluckString::new(fs, seed ^ (0x2971u32.wrapping_mul(k as u32 + 1)));
+            // Bright steel strings with a long, ringing shimmer and a touch of
+            // stiffness (the santur's high courses are audibly inharmonic).
+            s.damp = 0.30;
+            s.decay = 0.9972;
+            s.stiff = -0.10;
+            s
+        });
+        Course { strings }
+    }
+    fn active(&self) -> bool {
+        self.strings.iter().any(|s| s.active())
+    }
+}
+
+/// The **santur**: the Persian trapezoidal hammered dulcimer. Each note is a
+/// *course* of several steel strings struck together by a light wooden mallet
+/// (*mezrab*); the strings are tuned a few cents apart so they beat into a
+/// shimmering chorus, and the trapezoidal soundboard colours the whole. Played
+/// fast, the overlapping courses cascade — the sound the santur is loved for.
+///
+/// A modular voice maps onto it as a **pool of courses**: each strike allocates
+/// the next course (round-robin) so notes ring on and bloom into one another,
+/// exactly like a player's rapid two-mallet tremolo. Feed it already-quantized
+/// pitches (e.g. from a dastgah `.scl` via the [`puget_dsp`] quantizer).
+pub struct Santur {
+    courses: Vec<Course>,
+    body: [Reso; 3],
+    body_mix: f32,
+    next: usize,
+    /// Unison spread within a course, in cents (the shimmer).
+    detune_cents: f32,
+    width: f32,
+}
+
+impl Santur {
+    /// Build a santur voice. `courses` is the polyphony (how many notes can ring
+    /// at once); a fast santur passage overlaps many.
+    pub fn new(fs: f32) -> Self {
+        Self::with_courses(fs, 6)
+    }
+
+    /// Build with an explicit polyphony.
+    pub fn with_courses(fs: f32, courses: usize) -> Self {
+        let courses_n = courses.max(1);
+        let mut courses = Vec::with_capacity(courses_n);
+        for i in 0..courses_n {
+            courses.push(Course::new(fs, 0x5A17u32.wrapping_mul(i as u32 + 1)));
+        }
+        Santur {
+            courses,
+            // Trapezoidal walnut soundboard: bright, woody, with an airy top.
+            body: [
+                Reso::new(210.0, 7.0, 0.7, fs),
+                Reso::new(560.0, 9.0, 0.5, fs),
+                Reso::new(1600.0, 6.0, 0.3, fs),
+            ],
+            body_mix: 0.14,
+            next: 0,
+            detune_cents: 5.0,
+            width: 0.4,
+        }
+    }
+
+    /// Strike a note (Hz — feed it already quantized). Allocates the next course
+    /// and hits all of its strings together, each detuned a few cents around the
+    /// target so the course shimmers.
+    pub fn strike(&mut self, hz: f32, velocity: f32) {
+        let hz = hz.max(1.0);
+        let i = self.next;
+        self.next = (self.next + 1) % self.courses.len();
+        let n = SANTUR_STRINGS_PER_COURSE as f32;
+        for (k, s) in self.courses[i].strings.iter_mut().enumerate() {
+            // Spread the strings symmetrically across ±detune/2 cents.
+            let frac = if n > 1.0 { k as f32 / (n - 1.0) - 0.5 } else { 0.0 };
+            let cents = frac * self.detune_cents;
+            s.strike(hz * mathf::exp2(cents / 1200.0), velocity);
+        }
+    }
+
+    /// Unison detune within a course, in cents (0 = dead unison, more = wider,
+    /// wetter shimmer). Applies to the next strike.
+    pub fn set_shimmer(&mut self, cents: f32) {
+        self.detune_cents = cents.max(0.0);
+    }
+
+    /// Brightness of the strings: 0 = soft/felt, 1 = bright/brilliant steel.
+    pub fn set_brightness(&mut self, amount: f32) {
+        let a = amount.clamp(0.0, 1.0);
+        let damp = 0.5 - 0.35 * a;
+        for c in &mut self.courses {
+            for s in &mut c.strings {
+                s.damp = damp;
+            }
+        }
+    }
+
+    /// Sustain of the strings: 0 = quickly damped, 1 = long ringing shimmer.
+    pub fn set_sustain(&mut self, amount: f32) {
+        let a = amount.clamp(0.0, 1.0);
+        let decay = 0.992 + 0.0068 * a;
+        for c in &mut self.courses {
+            for s in &mut c.strings {
+                s.decay = decay;
+            }
+        }
+    }
+
+    /// Stereo spread of the soundboard field (0 = mono, 1 = wide).
+    pub fn set_width(&mut self, amount: f32) {
+        self.width = amount.clamp(0.0, 1.0);
+    }
+
+    /// Whether any course is still ringing.
+    pub fn active(&self) -> bool {
+        self.courses.iter().any(|c| c.active())
+    }
+
+    /// One stereo sample. Courses are laid across the trapezoid left-to-right;
+    /// the soundboard colours their sum, centred.
+    #[inline]
+    pub fn process(&mut self) -> (f32, f32) {
+        let n = self.courses.len();
+        let mut mono = 0.0;
+        let mut l = 0.0;
+        let mut r = 0.0;
+        for (i, c) in self.courses.iter_mut().enumerate() {
+            let mut cx = 0.0;
+            for s in &mut c.strings {
+                cx += s.tick();
+            }
+            mono += cx;
+            let pos = if n > 1 { i as f32 / (n - 1) as f32 - 0.5 } else { 0.0 };
+            let pan = pos * self.width;
+            l += cx * (0.5 - pan);
+            r += cx * (0.5 + pan);
+        }
+        let mut b = 0.0;
+        for res in &mut self.body {
+            b += res.tick(mono);
+        }
+        let body = self.body_mix * b;
+        // Makeup for the many strings (courses × strings-per-course).
+        let g = 1.4 / mathf::sqrt((n * SANTUR_STRINGS_PER_COURSE) as f32);
+        ((l + body) * g, (r + body) * g)
+    }
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
@@ -748,6 +928,65 @@ mod tests {
             swing_on > swing_off + 2.0,
             "vibrato did not modulate pitch: off {swing_off:.2} Hz, on {swing_on:.2} Hz"
         );
+    }
+
+    #[test]
+    fn santur_strikes_ring_and_decay() {
+        let fs = 48_000.0;
+        let mut s = Santur::new(fs);
+        s.set_brightness(0.6);
+        s.set_sustain(0.7);
+        // A little cascade across courses.
+        for &hz in &[261.63f32, 293.66, 329.63, 392.0, 440.0] {
+            s.strike(hz, 0.85);
+            for _ in 0..5_000 {
+                let (l, r) = s.process();
+                assert!(l.is_finite() && r.is_finite(), "non-finite");
+            }
+        }
+        let mut peak = 0.0f32;
+        for _ in 0..4_000 {
+            let (l, r) = s.process();
+            peak = peak.max(l.abs()).max(r.abs());
+        }
+        assert!(peak > 0.01, "too quiet: {peak}");
+        for _ in 0..fs as usize * 8 {
+            s.process();
+        }
+        let mut tail = 0.0f32;
+        for _ in 0..4_800 {
+            let (l, r) = s.process();
+            tail = tail.max(l.abs()).max(r.abs());
+        }
+        assert!(tail < peak, "did not decay: tail {tail} vs peak {peak}");
+    }
+
+    #[test]
+    fn santur_course_is_in_tune() {
+        // A struck course should ring at the requested pitch (the unison spread
+        // beats around it but the perceived pitch is the centre).
+        let fs = 48_000.0;
+        let mut s = Santur::with_courses(fs, 1);
+        s.set_sustain(1.0);
+        s.set_shimmer(5.0);
+        s.strike(220.0, 1.0);
+        let buf: Vec<f32> = (0..16_384).map(|_| s.process().0).collect();
+        let (lo, hi) = ((fs / 400.0) as usize, (fs / 120.0) as usize);
+        let mut best = f32::MIN;
+        let mut lag0 = lo;
+        for lag in lo..hi {
+            let mut acc = 0.0;
+            for i in 0..buf.len() - lag {
+                acc += buf[i] * buf[i + lag];
+            }
+            if acc > best {
+                best = acc;
+                lag0 = lag;
+            }
+        }
+        let f = fs / lag0 as f32;
+        let cents = 1200.0 * (f / 220.0).log2();
+        assert!(cents.abs() < 25.0, "course off by {cents:.1} cents ({f:.1} Hz)");
     }
 
     #[test]

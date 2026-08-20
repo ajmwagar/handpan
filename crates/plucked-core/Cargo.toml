@@ -27,3 +27,7 @@ required-features = ["std"]
 [[example]]
 name = "render_basitar"
 required-features = ["std"]
+
+[[example]]
+name = "render_santur"
+required-features = ["std"]
