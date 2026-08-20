@@ -24,3 +24,7 @@ puget-dsp = { path = "../puget-dsp", default-features = false }
 [[example]]
 name = "render_dohol"
 required-features = ["std"]
+
+[[example]]
+name = "render_tombak"
+required-features = ["std"]

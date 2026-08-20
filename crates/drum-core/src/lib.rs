@@ -1,11 +1,14 @@
 //! # drum-core
 //!
-//! Membrane-drum physical modeling — a **bass drum** of the Persian *dohol* /
-//! Turkish–Balkan *davul* family: a big double-headed drum slung on the body,
-//! struck with a heavy beater on one side (the deep boom) and a thin switch on
-//! the other (the sharp crack). Culturally it is the outdoor bass voice paired
-//! with the *sorna*; retuned, the same model covers the davul, the taiko, or a
-//! kit bass drum.
+//! Membrane-drum physical modeling. Two voices share one circular-membrane
+//! engine:
+//! - the **[`Dohol`]** — a **bass drum** of the Persian *dohol* / Turkish–Balkan
+//!   *davul* family: a big double-headed drum struck with a heavy beater (the
+//!   deep boom) and a thin switch (the sharp crack); retuned it covers the
+//!   davul, taiko, or a kit bass drum;
+//! - the **[`Tombak`]** (*zarb*) — the Persian goblet hand drum, the lead voice
+//!   of the classical percussion: a pitched, resonant *tom* at the centre, a
+//!   dry bright *bak* at the rim, and light *finger* taps for the rapid rolls.
 //!
 //! A real drumhead is a **2D circular membrane**, so its partials are the Bessel
 //! modes — *inharmonic* ratios (1 : 1.59 : 2.14 : 2.30 : …), nothing like a
@@ -264,6 +267,192 @@ impl Dohol {
     }
 }
 
+/// A 2-pole resonator — one wooden-body mode of the tombak's goblet chamber.
+#[derive(Default, Clone, Copy)]
+struct Reso {
+    a1: f32,
+    a2: f32,
+    g: f32,
+    y1: f32,
+    y2: f32,
+}
+impl Reso {
+    fn new(freq: f32, q: f32, gain: f32, fs: f32) -> Self {
+        let w = core::f32::consts::TAU * freq / fs;
+        let r = mathf::exp(-core::f32::consts::PI * freq / (q * fs));
+        Reso { a1: 2.0 * r * mathf::cos(w), a2: -(r * r), g: gain * mathf::sin(w), y1: 0.0, y2: 0.0 }
+    }
+    #[inline]
+    fn tick(&mut self, x: f32) -> f32 {
+        let y = self.g * x + self.a1 * self.y1 + self.a2 * self.y2;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+}
+
+/// The **tombak** (*zarb*): the Persian goblet hand drum — the lead voice of the
+/// classical percussion. Its wine-goblet wooden body carries a single head that
+/// the player works with extraordinary finger detail. Three core strokes:
+/// - **tom** — a full-hand hit near the centre: a deep, resonant, pitched tone
+///   (the body chamber rings);
+/// - **bak** — a fingertip at the rim: a sharp, dry, bright slap;
+/// - **finger** — a light articulate tap, the basis of the rapid *riz* rolls.
+///
+/// The head is the same 2D circular-membrane modal bank as the [`Dohol`], but
+/// tuned higher and more pitched, with far less tension pitch-drop (a hand, not
+/// a heavy beater) and a resonant goblet **body** colouring the tone.
+pub struct Tombak {
+    fs: f32,
+    fund: f32,
+    modes: [ModeState; MEMBRANE.len()],
+    glide: f32,
+    glide_coef: f32,
+    pitch_drop: f32,
+    rng: Rng,
+    // Fingertip/slap noise transient.
+    noise_rem: u32,
+    noise_amp: f32,
+    noise_lp: f32,
+    noise_coef: f32,
+    // Goblet wooden body.
+    body: [Reso; 2],
+    body_mix: f32,
+    t60: f32,
+    out_lp: f32,
+    out_pole: f32,
+}
+
+impl Tombak {
+    pub fn new(fs: f32) -> Self {
+        let mut t = Tombak {
+            fs,
+            fund: 100.0,
+            modes: [ModeState::default(); MEMBRANE.len()],
+            glide: 1.0,
+            // A hand barely stretches the head — a small, quick pitch-drop.
+            glide_coef: 1.0 - mathf::exp(-1.0 / (0.025 * fs)),
+            pitch_drop: 0.06,
+            rng: Rng(0x2BAD_C0DE),
+            noise_rem: 0,
+            noise_amp: 0.0,
+            noise_lp: 0.0,
+            noise_coef: 0.0,
+            // Goblet chamber: a woody low thunk + a warm mid.
+            body: [Reso::new(190.0, 6.0, 0.7, fs), Reso::new(430.0, 8.0, 0.4, fs)],
+            body_mix: 0.22,
+            t60: 0.40,
+            out_lp: 0.0,
+            // Brighter/more open than the bass drum (~7 kHz).
+            out_pole: mathf::exp(-core::f32::consts::TAU * 7000.0 / fs),
+        };
+        t.reset_state();
+        t
+    }
+
+    fn reset_state(&mut self) {
+        for m in &mut self.modes {
+            *m = ModeState::default();
+        }
+    }
+
+    /// Tune the drum — the tom's fundamental (Hz). A tombak sits fairly high for
+    /// a hand drum; ~90–130 Hz is typical.
+    pub fn set_tune(&mut self, hz: f32) {
+        self.fund = hz.clamp(40.0, 400.0);
+    }
+
+    /// Base ring length of the tom in seconds (higher modes scale down from it).
+    pub fn set_decay(&mut self, seconds: f32) {
+        self.t60 = seconds.clamp(0.05, 4.0);
+    }
+
+    /// Internal: excite the head. `pos` 0 = centre..1 = rim; `decay_scale` shortens
+    /// the ring; `slap`/`bright` set the fingertip-noise level and cutoff; `drop`
+    /// scales the (small) tension pitch-drop.
+    fn hit(&mut self, velocity: f32, pos: f32, decay_scale: f32, slap: f32, bright: f32, drop: f32) {
+        let vel = velocity.clamp(0.0, 1.0);
+        let pos = pos.clamp(0.0, 1.0);
+        self.glide = 1.0 + self.pitch_drop * drop * (0.5 + 0.5 * vel) * (1.0 - 0.5 * pos);
+        for (st, md) in self.modes.iter_mut().zip(MEMBRANE.iter()) {
+            let f = self.fund * md.ratio;
+            if f >= self.fs * 0.48 {
+                st.amp = 0.0;
+                continue;
+            }
+            let m = md.m as f32;
+            let pos_w = if md.m == 0 {
+                1.0 - 0.55 * pos
+            } else {
+                (0.2 + pos) * (1.0 + 0.15 * m * pos)
+            };
+            st.inc = core::f32::consts::TAU * f / self.fs;
+            st.phase = (self.rng.next_f() + 1.0) * 0.5 * core::f32::consts::TAU;
+            st.amp = vel * md.gain * pos_w;
+            let t60 = (self.t60 * md.decay_rel * decay_scale).max(0.01);
+            st.dec = mathf::exp(-6.9078 / (t60 * self.fs));
+        }
+        self.noise_rem = (0.008 * self.fs) as u32;
+        self.noise_amp = vel * slap;
+        self.noise_coef = 1.0 - mathf::exp(-core::f32::consts::TAU * bright / self.fs);
+    }
+
+    /// **Tom**: a full-hand hit near the centre — the deep, resonant, pitched
+    /// bass tone (the goblet body rings).
+    pub fn tom(&mut self, velocity: f32) {
+        self.hit(velocity, 0.12, 1.0, 0.15, 1400.0, 1.0);
+    }
+
+    /// **Bak**: a fingertip at the rim — a sharp, dry, bright slap.
+    pub fn bak(&mut self, velocity: f32) {
+        self.hit(velocity, 0.9, 0.32, 0.95, 6500.0, 0.3);
+    }
+
+    /// **Finger**: a light articulate tap — the basis of the rapid *riz* rolls.
+    pub fn finger(&mut self, velocity: f32) {
+        self.hit(velocity * 0.7, 0.55, 0.5, 0.45, 3800.0, 0.2);
+    }
+
+    /// Whether the drum is still sounding.
+    pub fn active(&self) -> bool {
+        self.noise_rem > 0 || self.modes.iter().any(|m| m.amp > 1e-4)
+    }
+
+    /// One stereo sample (a single drum → centred/mono).
+    #[inline]
+    pub fn process(&mut self) -> (f32, f32) {
+        self.glide += (1.0 - self.glide) * self.glide_coef;
+
+        let mut s = 0.0;
+        for st in &mut self.modes {
+            if st.amp <= 1e-5 {
+                continue;
+            }
+            s += st.amp * mathf::sin(st.phase);
+            st.phase += st.inc * self.glide;
+            if st.phase >= core::f32::consts::TAU {
+                st.phase -= core::f32::consts::TAU;
+            }
+            st.amp *= st.dec;
+        }
+        if self.noise_rem > 0 {
+            self.noise_rem -= 1;
+            let n = self.rng.next_f();
+            self.noise_lp += self.noise_coef * (n - self.noise_lp);
+            s += self.noise_amp * self.noise_lp;
+        }
+        // Goblet body colours the head + slap.
+        let mut b = 0.0;
+        for r in &mut self.body {
+            b += r.tick(s);
+        }
+        let mixed = s + self.body_mix * b;
+        self.out_lp += (1.0 - self.out_pole) * (mixed - self.out_lp);
+        let out = self.out_lp * 1.2;
+        (out, out)
+    }
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
@@ -354,5 +543,81 @@ mod tests {
         let centre = high_ratio(0.05);
         let edge = high_ratio(0.95);
         assert!(edge > centre, "edge {edge:.4} not brighter than centre {centre:.4}");
+    }
+
+    #[test]
+    fn tombak_strokes_sound_and_decay() {
+        let fs = 48_000.0;
+        let mut t = Tombak::new(fs);
+        t.set_tune(100.0);
+        for (i, stroke) in [0u8, 1, 2].iter().enumerate() {
+            match stroke {
+                0 => t.tom(0.9),
+                1 => t.bak(0.9),
+                _ => t.finger(0.9),
+            }
+            let _ = i;
+            let mut peak = 0.0f32;
+            for _ in 0..3_000 {
+                let (l, r) = t.process();
+                assert!(l.is_finite() && r.is_finite(), "non-finite");
+                peak = peak.max(l.abs());
+            }
+            assert!(peak > 0.01, "stroke {stroke} too quiet: {peak}");
+        }
+        // Ring out; a drum decays.
+        let mut peak = 0.0f32;
+        t.tom(1.0);
+        for i in 0..fs as usize * 2 {
+            let x = t.process().0.abs();
+            if i < 3_000 {
+                peak = peak.max(x);
+            }
+        }
+        let mut tail = 0.0f32;
+        for _ in 0..4_800 {
+            tail = tail.max(t.process().0.abs());
+        }
+        assert!(tail < peak, "did not decay: tail {tail} vs peak {peak}");
+    }
+
+    #[test]
+    fn bak_is_brighter_and_shorter_than_tom() {
+        // The rim bak should be brighter (more HF) and decay faster than the
+        // centre tom.
+        let fs = 48_000.0;
+        fn measure(bak: bool) -> (f32, f32) {
+            let fs = 48_000.0;
+            let mut t = Tombak::new(fs);
+            t.set_tune(100.0);
+            t.set_decay(0.4);
+            if bak {
+                t.bak(0.9);
+            } else {
+                t.tom(0.9);
+            }
+            let mut prev = 0.0;
+            let (mut hf, mut tot) = (0.0f32, 1e-9f32);
+            let mut early = 0.0f32;
+            let mut late = 0.0f32;
+            for i in 0..12_000 {
+                let x = t.process().0;
+                let h = x - prev;
+                prev = x;
+                hf += h * h;
+                tot += x * x;
+                if i < 1_000 {
+                    early = early.max(x.abs());
+                }
+                if (6_000..7_000).contains(&i) {
+                    late = late.max(x.abs());
+                }
+            }
+            (hf / tot, late / early.max(1e-9))
+        }
+        let (tom_hf, tom_sustain) = measure(false);
+        let (bak_hf, bak_sustain) = measure(true);
+        assert!(bak_hf > tom_hf, "bak {bak_hf:.4} not brighter than tom {tom_hf:.4}");
+        assert!(bak_sustain < tom_sustain, "bak did not decay faster: {bak_sustain:.4} vs {tom_sustain:.4}");
     }
 }
