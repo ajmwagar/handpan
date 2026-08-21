@@ -174,6 +174,23 @@ pub enum WindKind {
     /// harmonics through a nasal formant — very loud, bright, buzzy and nasal.
     /// The outdoor partner to the dohol.
     Sorna,
+    /// Irish **tin whistle** (penny whistle): a small fipple/whistle flute — the
+    /// flute's air-jet oscillator byte-for-byte (proven register stability), but
+    /// voiced bright, pure and simple, with a clean two-register overblow and a
+    /// penny-whistle "chiff" on the attack. Shriller and cleaner up top than the
+    /// concert flute; not breathy/hollow like the ney.
+    TinWhistle,
+    /// Irish **wooden transverse flute**: the flute's air-jet oscillator, voiced
+    /// woodier, breathier and rounder than the silver concert flute — a warm,
+    /// reedy-but-airy folk tone with a soft top and a prominent breath layer.
+    IrishFlute,
+    /// **Uilleann pipes** — the bellows-blown Irish bagpipe. Modeled as the
+    /// **chanter**: the sax/sorna single-reed conical loop (proven stable),
+    /// voiced bright, sweet and nasal with strong even harmonics (all-harmonic).
+    /// Carries an internal **drone** bank (the pipes' constant tonic drones,
+    /// tonic in octaves) sounded via [`Wind::set_drone`]; the chordal regulators
+    /// are out of scope.
+    UilleannPipes,
 }
 
 /// A wind instrument: a nonlinear reed exciter driving a bore waveguide.
@@ -300,6 +317,17 @@ pub struct Wind {
     out_lp: f32,
     out_lp2: f32,
 
+    // Uilleann drone bank: the pipes' constant tonic drones (tonic in octaves),
+    // independent of the chanter loop — cheap lowpassed-sawtooth reed oscillators
+    // summed under the chanter output. Stable by construction (no feedback), so
+    // they never destabilize the reed. `set_drone` populates the three octaves.
+    drone_on: bool,
+    drone_freqs: [f32; 3],
+    drone_phase: [f32; 3],
+    drone_lp: [f32; 3],
+    drone_lp_c: f32,
+    drone_gain: [f32; 3],
+
     out_gain: f32,
 }
 
@@ -333,6 +361,18 @@ impl Wind {
             // loud output; low, focused breath noise so the buzz stays bright
             // rather than washed out.
             WindKind::Sorna => (0.7, -0.50, 1.9, 0.035),
+            // Tin whistle: no reed table (jet drive, like the flute). Low breath
+            // noise — the penny whistle is pure and clean, not airy like the ney
+            // (0.16) or the concert flute (0.14).
+            WindKind::TinWhistle => (0.0, 0.0, 1.0, 0.06),
+            // Irish flute: no reed table (jet drive). Breathier than the silver
+            // concert flute (0.14) — the wooden folk flute's warm air layer.
+            WindKind::IrishFlute => (0.0, 0.0, 1.0, 0.17),
+            // Uilleann chanter: the sax/sorna single-reed loop (offset 0.7,
+            // slope -0.50 — the PROVEN-stable reed; a steeper table choked the
+            // sorna oscillator, so the chanter reuses the shallow one). Moderate
+            // output; low breath noise so the reed reads sweet and focused.
+            WindKind::UilleannPipes => (0.7, -0.50, 1.6, 0.04),
         };
         // Reflection: clarinet inverts (odd-harmonic, quarter-wave); the
         // conical sax and the brass bore are effectively open (all harmonics),
@@ -374,6 +414,19 @@ impl Wind {
             // 0.50 vs 0.57) so the odd stack stays strong and buzzy under the
             // radiated evens — the piercing double-reed shawm color.
             WindKind::Sorna => (0.95, 0.55),
+            // Tin whistle: the flute's inverting jet loop, byte-for-byte in the
+            // oscillator (loss/damp identical) so it inherits the flute's proven
+            // register stability. Brightness/purity come from the non-feedback
+            // stages, exactly as the ney's breathiness does.
+            WindKind::TinWhistle => (0.95, 0.60),
+            // Irish flute: the flute's jet loop, byte-for-byte (identical
+            // oscillator → identical proven pitch/register stability). Its
+            // woodier, rounder tone comes from the radiation stages, not the loop.
+            WindKind::IrishFlute => (0.95, 0.60),
+            // Uilleann chanter: the sax's inverting single-reed loop, bright
+            // (damp 0.55, like the sorna) so the odd stack stays present under
+            // the radiated evens — a sweet, nasal, all-harmonic reed.
+            WindKind::UilleannPipes => (0.95, 0.55),
         };
         let radiate = match kind {
             // Clarinet: presence lift restoring the sub-cutoff harmonics + a
@@ -415,6 +468,25 @@ impl Wind {
             WindKind::Sorna => {
                 [Peaking::new(1500.0, 1.4, 10.0, fs), Peaking::new(2800.0, 1.1, 6.0, fs)]
             }
+            // Tin whistle: bright and a bit shrill — a mid presence lift plus a
+            // strong upper-presence lift (~3 kHz) for the penny whistle's clean,
+            // piercing top (the opposite of the flute's soft high cut).
+            WindKind::TinWhistle => {
+                [Peaking::new(800.0, 0.7, 2.0, fs), Peaking::new(3000.0, 1.0, 6.0, fs)]
+            }
+            // Irish flute: woody and round — a warm low-body lift and a deeper
+            // high cut than the silver concert flute (-8 vs -6 dB), so the top is
+            // soft and the tone reads wooden and reedy-but-airy.
+            WindKind::IrishFlute => {
+                [Peaking::new(450.0, 0.8, 4.0, fs), Peaking::new(3000.0, 0.7, -8.0, fs)]
+            }
+            // Uilleann chanter: the nasal reed "cry" — a strong mid formant
+            // (~1.4 kHz) and an upper-presence lift (~2.4 kHz) for the sweet,
+            // nasal, projecting chanter voice (softer/sweeter than the sorna's
+            // harder shawm bark).
+            WindKind::UilleannPipes => {
+                [Peaking::new(1400.0, 1.3, 8.0, fs), Peaking::new(2400.0, 1.0, 4.0, fs)]
+            }
         };
         // Flute jet parameters (jet_ratio, jet_refl, end_refl, tune_scale,
         // tune_off) and its breath window (bias, scale). tune_scale corrects the
@@ -424,6 +496,11 @@ impl Wind {
             // Ney: the same jet embouchure and tuning as the flute (identical
             // oscillator core → identical, proven pitch and register stability).
             WindKind::Ney => (0.30, 0.5, 0.5, 1.542, 0.0),
+            // Tin whistle & Irish flute: the flute's jet embouchure and tuning
+            // byte-for-byte — the whole fipple/transverse-flute family shares the
+            // proven-stable jet oscillator; only the radiation voicing differs.
+            WindKind::TinWhistle => (0.30, 0.5, 0.5, 1.542, 0.0),
+            WindKind::IrishFlute => (0.30, 0.5, 0.5, 1.542, 0.0),
             _ => (0.0, 0.0, 0.0, 1.0, 0.0),
         };
         let (flute_breath_bias, flute_breath_scale) = (0.87, 0.07);
@@ -526,11 +603,28 @@ impl Wind {
                     // Sorna: a high cutoff — the shawm's buzz and nasal upper
                     // harmonics must project, so keep the top open.
                     WindKind::Sorna => 5000.0,
+                    // Tin whistle: very open top — brighter/shriller than the
+                    // concert flute so the penny whistle's clean edge cuts through.
+                    WindKind::TinWhistle => 12_000.0,
+                    // Irish flute: darker top than the concert flute (9 kHz) for
+                    // the wooden, rounded folk tone; the breath carries the air.
+                    WindKind::IrishFlute => 6000.0,
+                    // Uilleann chanter: open enough for the reedy, nasal buzz to
+                    // project, but a touch sweeter than the sorna's 5 kHz.
+                    WindKind::UilleannPipes => 4500.0,
                 };
                 mathf::exp(-core::f32::consts::TAU * fc / fs)
             },
             out_lp: 0.0,
             out_lp2: 0.0,
+            drone_on: false,
+            drone_freqs: [0.0; 3],
+            drone_phase: [0.0, 0.33, 0.66],
+            drone_lp: [0.0; 3],
+            // ~2 kHz one-pole: a warm, reedy drone bed (buzzy but not fizzy).
+            drone_lp_c: 1.0 - mathf::exp(-core::f32::consts::TAU * 2000.0 / fs),
+            // Tenor loudest, the lower octaves progressively softer.
+            drone_gain: [0.30, 0.24, 0.18],
             out_gain,
         }
     }
@@ -564,11 +658,22 @@ impl Wind {
             // Sorna: conical bore on the quarter-wave single-reed loop (like the
             // sax); the even harmonics are radiated at the output, not by the bore.
             WindKind::Sorna => self.fs / self.freq * 0.5 - 1.0 - fgd,
+            // Tin whistle & Irish flute: open-open jet bore, exactly like the
+            // flute (their own tune_scale — identical to the flute's).
+            WindKind::TinWhistle | WindKind::IrishFlute => {
+                self.fs / self.freq * self.tune_scale - self.tune_off - 1.0 - fgd
+            }
+            // Uilleann chanter: conical bore on the quarter-wave single-reed loop
+            // (like the sax/sorna); evens radiated at the output, not by the bore.
+            WindKind::UilleannPipes => self.fs / self.freq * 0.5 - 1.0 - fgd,
         };
         let d = d.max(4.0);
         self.bore_delay = d;
         self.bore.set_delay(d);
-        if matches!(self.kind, WindKind::Flute | WindKind::Ney) {
+        if matches!(
+            self.kind,
+            WindKind::Flute | WindKind::Ney | WindKind::TinWhistle | WindKind::IrishFlute
+        ) {
             self.jet.set_delay((d * self.jet_ratio).max(1.0));
         }
         if self.kind == WindKind::Trumpet {
@@ -611,6 +716,14 @@ impl Wind {
             WindKind::Ney => 0.09,
             // Sorna: a short, hard double-reed chiff.
             WindKind::Sorna => 0.035,
+            // Tin whistle: the crisp penny-whistle "chiff" — a short, bright
+            // breath spit as the fipple catches at the note-on. The signature
+            // articulation of the whistle.
+            WindKind::TinWhistle => 0.03,
+            // Irish flute: a breathier, slightly longer wooden-flute onset.
+            WindKind::IrishFlute => 0.05,
+            // Uilleann chanter: a short reed chiff as the reed speaks.
+            WindKind::UilleannPipes => 0.03,
             _ => 0.0,
         };
         self.onset_len = (ms * self.fs).max(1.0);
@@ -663,6 +776,17 @@ impl Wind {
             // sooner than the sax's — top out at ~0.55 so full breath stays the
             // loudest point while the reed keeps oscillating across the register.
             WindKind::Sorna => 0.30 + 0.28 * b,
+            // Tin whistle & Irish flute: the flute's exact narrow jet blowing
+            // window (onset ~0.87, overblows above ~1.0) — the jet is
+            // register-bistable, so the whole flute family reuses the proven
+            // window verbatim. The tin whistle's two-register overblow is the
+            // flute's own octave jump, reached by blowing harder within this map.
+            WindKind::TinWhistle | WindKind::IrishFlute => {
+                self.flute_breath_bias + self.flute_breath_scale * b
+            }
+            // Uilleann chanter: the sax/sorna reed window (tops out at ~0.58,
+            // inside the shallow reed's stable range across the chanter register).
+            WindKind::UilleannPipes => 0.30 + 0.28 * b,
         };
     }
 
@@ -734,6 +858,12 @@ impl Wind {
             // Sorna: opens toward a hard, buzzy double-reed embouchure; brighter
             // than the sax at every setting so the nasal buzz stays present.
             WindKind::Sorna => 0.63 - 0.16 * a,
+            // Tin whistle & Irish flute: the flute's exact narrow damp swing —
+            // keeps the jet oscillator identical to the flute's (proven register
+            // stability); a wider swing destabilizes the jet.
+            WindKind::TinWhistle | WindKind::IrishFlute => 0.64 - 0.08 * a,
+            // Uilleann chanter: opens toward a bright, nasal reed like the sorna.
+            WindKind::UilleannPipes => 0.63 - 0.16 * a,
         };
         // Timbre also biases the didgeridoo's vocal-formant centre (mouth shape).
         if self.kind == WindKind::Didgeridoo {
@@ -811,7 +941,11 @@ impl Wind {
             // Single reed (clarinet cylindrical / sax conical): the reflected
             // bore pressure drives the nonlinear reed, scattered back in. The
             // clarinet's loop inverts (odd harmonics); the sax's does not (all).
-            WindKind::Clarinet | WindKind::Saxophone | WindKind::Didgeridoo | WindKind::Sorna => {
+            WindKind::Clarinet
+            | WindKind::Saxophone
+            | WindKind::Didgeridoo
+            | WindKind::Sorna
+            | WindKind::UilleannPipes => {
                 let refl = self.refl.tick(self.bore.last_out());
                 let pdiff = refl - breath;
                 self.bore.tick(breath + pdiff * self.reed(pdiff))
@@ -819,7 +953,7 @@ impl Wind {
             // Air jet (flute): the reflected bore pressure (DC-blocked) drives a
             // cubic jet nonlinearity through the embouchure delay, summed with
             // the end reflection back into the open bore. All harmonics.
-            WindKind::Flute | WindKind::Ney => {
+            WindKind::Flute | WindKind::Ney | WindKind::TinWhistle | WindKind::IrishFlute => {
                 let filt = self.refl.tick(self.bore.last_out());
                 let temp = filt - self.jdc_x1 + 0.995 * self.jdc_y1;
                 self.jdc_x1 = filt;
@@ -880,6 +1014,10 @@ impl Wind {
             // all-harmonic double reed. Uses the raw squared term (not the sax's
             // fundamental-biased copy) so the upper cross-products add buzz.
             WindKind::Sorna => 2.0,
+            // Uilleann chanter: strong evens turn the odd-only reed loop into the
+            // sweet, nasal, all-harmonic chanter — a touch less than the sorna so
+            // it reads sweeter than the harder shawm.
+            WindKind::UilleannPipes => 1.8,
             _ => 0.0,
         };
         if even_amt > 0.0 {
@@ -951,7 +1089,46 @@ impl Wind {
         } else {
             1.0
         };
-        self.out_lp2 * self.out_gain * bloom_gain
+        let mut y_out = self.out_lp2 * self.out_gain * bloom_gain;
+
+        // Uilleann drones: the pipes' constant tonic drones, tonic in octaves.
+        // Cheap lowpassed-sawtooth reed oscillators, summed under the chanter and
+        // fully independent of the reed loop — always sounding while `drone_on`,
+        // so they continue between chanter notes (the constant bed of the pipes).
+        if self.drone_on {
+            let mut d = 0.0;
+            for i in 0..3 {
+                if self.drone_freqs[i] <= 0.0 {
+                    continue;
+                }
+                self.drone_phase[i] += self.drone_freqs[i] / self.fs;
+                if self.drone_phase[i] >= 1.0 {
+                    self.drone_phase[i] -= 1.0;
+                }
+                // A sawtooth (rich, reedy harmonics), tamed by a one-pole low-pass
+                // so the drone is a warm buzz, not a fizzy edge.
+                let saw = 2.0 * self.drone_phase[i] - 1.0;
+                self.drone_lp[i] += self.drone_lp_c * (saw - self.drone_lp[i]);
+                d += self.drone_gain[i] * self.drone_lp[i];
+            }
+            y_out += d;
+        }
+        y_out
+    }
+
+    /// Sound (or silence) the uilleann pipes' constant **drones** — the tonic
+    /// held underneath the chanter melody. `hz` is the tenor-drone pitch (the
+    /// tonic); the bank also sounds it one and two octaves below (baritone and
+    /// bass), the classic uilleann drone stack. `on` starts/stops the whole bank.
+    /// The drones are independent low-frequency oscillators (no reed feedback),
+    /// so they are stable by construction and keep sounding between chanter notes.
+    /// A no-op on the other voices. The chordal regulators are out of scope.
+    pub fn set_drone(&mut self, hz: f32, on: bool) {
+        self.drone_on = on && self.kind == WindKind::UilleannPipes;
+        if hz > 0.0 {
+            // Tenor (tonic), baritone (−1 oct), bass (−2 oct).
+            self.drone_freqs = [hz, hz * 0.5, hz * 0.25];
+        }
     }
 }
 
@@ -1474,6 +1651,210 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn irish_winds_sound_and_stop() {
+        // The three Irish voices must self-oscillate cleanly (finite, audible, no
+        // runaway) and die after note_off. The two jet voices (tin whistle, Irish
+        // flute) are blown in the flute family's stable D4-up register; the reed
+        // chanter is stable across its whole range.
+        let fs = 48_000.0;
+        for &(kind, f0) in &[
+            (WindKind::TinWhistle, 293.66f32), // D4
+            (WindKind::TinWhistle, 523.25),    // C5
+            (WindKind::IrishFlute, 293.66),    // D4
+            (WindKind::IrishFlute, 440.0),     // A4
+            (WindKind::UilleannPipes, 196.0),  // G3
+            (WindKind::UilleannPipes, 293.66), // D4
+        ] {
+            let mut v = Wind::new(fs, kind);
+            v.note_on(f0, 0.9);
+            let mut peak = 0.0f32;
+            for i in 0..fs as usize {
+                let s = v.process();
+                assert!(s.is_finite(), "{kind:?} non-finite");
+                if i > fs as usize / 2 {
+                    peak = peak.max(s.abs());
+                }
+            }
+            assert!(peak > 0.01, "{kind:?} @ {f0} did not sound: {peak}");
+            assert!(peak < 20.0, "{kind:?} @ {f0} runaway: {peak}");
+            v.note_off();
+            for _ in 0..fs as usize {
+                v.process();
+            }
+            let mut tail = 0.0f32;
+            for _ in 0..4_800 {
+                tail = tail.max(v.process().abs());
+            }
+            assert!(tail < peak, "{kind:?} @ {f0} did not stop");
+        }
+    }
+
+    #[test]
+    fn irish_winds_in_tune() {
+        // Pitch accuracy across a few pitches each. The two jet voices hold their
+        // register cleanly from D4 up (the flute family's stable range, and the
+        // real whistle/Irish-flute range); the reed chanter is in tune across its
+        // whole register.
+        let fs = 48_000.0;
+        let cases: &[(WindKind, f32, f32)] = &[
+            (WindKind::TinWhistle, 293.66, 0.9), // D4
+            (WindKind::TinWhistle, 392.0, 0.9),  // G4
+            (WindKind::TinWhistle, 440.0, 0.9),  // A4
+            (WindKind::TinWhistle, 587.33, 0.9), // D5
+            (WindKind::IrishFlute, 293.66, 0.9), // D4
+            (WindKind::IrishFlute, 392.0, 0.9),  // G4
+            (WindKind::IrishFlute, 523.25, 0.9), // C5
+            (WindKind::UilleannPipes, 196.0, 0.85), // G3
+            (WindKind::UilleannPipes, 293.66, 0.85), // D4
+            (WindKind::UilleannPipes, 392.0, 0.85),  // G4
+            (WindKind::UilleannPipes, 587.33, 0.85), // D5
+        ];
+        for &(kind, f0, breath) in cases {
+            let mut v = Wind::new(fs, kind);
+            v.set_brightness(0.5);
+            v.note_on(f0, breath);
+            let f = measured_hz(&mut v, fs, 24_000, 16_384);
+            let cents = 1200.0 * (f / f0).log2();
+            assert!(cents.abs() < 25.0, "{kind:?} {f0}Hz off by {cents:.1} cents ({f:.1})");
+        }
+    }
+
+    #[test]
+    fn irish_winds_audible_across_breath() {
+        // Each voice must be audible across the usable breath range. The jet
+        // voices are swept on G4 (in-register at every breath); the reed chanter
+        // from a low pressure up.
+        let fs = 48_000.0;
+        let jet_breaths = [0.2f32, 0.4, 0.6, 0.8, 1.0];
+        let reed_breaths = [0.25f32, 0.5, 0.75, 1.0];
+        for &(kind, f0, breaths) in &[
+            (WindKind::TinWhistle, 392.0f32, &jet_breaths[..]),
+            (WindKind::IrishFlute, 392.0, &jet_breaths[..]),
+            (WindKind::UilleannPipes, 293.66, &reed_breaths[..]),
+        ] {
+            for &breath in breaths {
+                let mut v = Wind::new(fs, kind);
+                v.set_brightness(0.5);
+                v.note_on(f0, breath);
+                for _ in 0..24_000 {
+                    v.process();
+                }
+                let buf: Vec<f32> = (0..16_384).map(|_| v.process()).collect();
+                let rms = (buf.iter().map(|x| x * x).sum::<f32>() / buf.len() as f32).sqrt();
+                assert!(rms.is_finite(), "{kind:?} non-finite at breath {breath}");
+                assert!(rms > 0.05, "{kind:?} inaudible at breath {breath}: rms {rms:.4}");
+            }
+        }
+    }
+
+    #[test]
+    fn tin_whistle_brighter_than_irish_flute() {
+        // Character contrast: the tin whistle is shrill/pure up top; the wooden
+        // Irish flute is round and dark. At the same note the whistle carries far
+        // more upper-harmonic energy relative to its fundamental.
+        let fs = 48_000.0;
+        let f0 = 587.33f32; // D5
+        let hi_ratio = |kind| -> f32 {
+            let mut v = Wind::new(fs, kind);
+            v.set_brightness(0.6);
+            v.note_on(f0, 0.9);
+            for _ in 0..24_000 {
+                v.process();
+            }
+            let buf: Vec<f32> = (0..16_384).map(|_| v.process()).collect();
+            let h1 = harmonic(&buf, f0, 1.0, fs).max(1e-9);
+            let hi = harmonic(&buf, f0, 4.0, fs) + harmonic(&buf, f0, 5.0, fs);
+            hi / h1
+        };
+        let whistle = hi_ratio(WindKind::TinWhistle);
+        let flute = hi_ratio(WindKind::IrishFlute);
+        assert!(
+            whistle > flute,
+            "tin whistle should be brighter than the Irish flute: whistle {whistle:.4} vs flute {flute:.4}"
+        );
+    }
+
+    #[test]
+    fn uilleann_chanter_all_harmonic() {
+        // The chanter must radiate strong even harmonics (like the sax/sorna) — a
+        // full, nasal, all-harmonic reed rather than the clarinet's odd-only tone.
+        let fs = 48_000.0;
+        let f0 = 293.66f32; // D4
+        let mut v = Wind::new(fs, WindKind::UilleannPipes);
+        v.set_brightness(0.5);
+        v.note_on(f0, 0.9);
+        for _ in 0..24_000 {
+            v.process();
+        }
+        let buf: Vec<f32> = (0..16_384).map(|_| v.process()).collect();
+        let h1 = harmonic(&buf, f0, 1.0, fs);
+        let h2 = harmonic(&buf, f0, 2.0, fs);
+        let h3 = harmonic(&buf, f0, 3.0, fs);
+        let strongest = h1.max(h3).max(1e-9);
+        assert!(
+            h2 > 0.1 * strongest,
+            "uilleann chanter missing even harmonics: h1={h1:.3} h2={h2:.3} h3={h3:.3}"
+        );
+    }
+
+    #[test]
+    fn uilleann_drone_sounds_and_holds() {
+        // The drones must sound a steady tonic bed with no chanter note playing,
+        // stay finite, and sustain (they are constant, unlike the chanter). And
+        // set_drone must be a no-op on the other voices.
+        let fs = 48_000.0;
+        let mut v = Wind::new(fs, WindKind::UilleannPipes);
+        v.set_drone(146.83, true); // D3 tonic drone stack
+        // No chanter note — only the drones sound.
+        let mut early = 0.0f32;
+        let mut late = 0.0f32;
+        for i in 0..fs as usize * 2 {
+            let s = v.process();
+            assert!(s.is_finite(), "drone non-finite");
+            if (fs as usize / 2..fs as usize / 2 + 4_000).contains(&i) {
+                early = early.max(s.abs());
+            }
+            if i >= fs as usize * 2 - 4_000 {
+                late = late.max(s.abs());
+            }
+        }
+        assert!(late > 0.05, "drones did not sound: {late}");
+        assert!(late > early * 0.5, "drones decayed (should be constant): {early} -> {late}");
+        // Tuned to the tonic: the drone bed spans four octaves (tenor + two lower
+        // octaves), so its composite period is too long for the autocorrelation
+        // window — check the tonic pitch spectrally instead. The tonic (146.83)
+        // and its octaves must dominate a nearby off-pitch probe (190 Hz).
+        for _ in 0..4_000 {
+            v.process();
+        }
+        let buf: Vec<f32> = (0..16_384).map(|_| v.process()).collect();
+        let tonic = harmonic(&buf, 146.83, 1.0, fs) + harmonic(&buf, 73.42, 1.0, fs);
+        let off = harmonic(&buf, 190.0, 1.0, fs);
+        assert!(tonic > 3.0 * off.max(1e-9), "drone not on the tonic: tonic {tonic:.3} off {off:.3}");
+        // Turning the drones off silences the bed.
+        v.set_drone(0.0, false);
+        for _ in 0..fs as usize {
+            v.process();
+        }
+        let mut off = 0.0f32;
+        for _ in 0..4_800 {
+            off = off.max(v.process().abs());
+        }
+        assert!(off < late, "drones did not stop when turned off");
+
+        // set_drone is a no-op on non-uilleann voices: a silent clarinet stays
+        // silent even with the drone "on".
+        let mut c = Wind::new(fs, WindKind::Clarinet);
+        c.set_drone(200.0, true);
+        for _ in 0..24_000 {
+            c.process();
+        }
+        let buf: Vec<f32> = (0..16_384).map(|_| c.process()).collect();
+        let rms = (buf.iter().map(|x| x * x).sum::<f32>() / buf.len() as f32).sqrt();
+        assert!(rms < 0.01, "set_drone leaked onto the clarinet: rms {rms:.4}");
     }
 
     #[test]

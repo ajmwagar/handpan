@@ -43,3 +43,15 @@ required-features = ["std"]
 [[example]]
 name = "render_sorna"
 required-features = ["std"]
+
+[[example]]
+name = "render_tin_whistle"
+required-features = ["std"]
+
+[[example]]
+name = "render_irish_flute"
+required-features = ["std"]
+
+[[example]]
+name = "render_uilleann"
+required-features = ["std"]
