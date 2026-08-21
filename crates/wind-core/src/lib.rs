@@ -209,6 +209,27 @@ pub struct Wind {
     reed_offset: f32,
     reed_slope: f32,
 
+    // Dynamic reed (spike): the reed tip modeled as a one-DOF damped mass-spring
+    // resonator with state (y, y_dot) instead of the static memoryless table.
+    // `y` is the tip opening (rest = reed_y0, closes/beats against the lay at 0);
+    // resonance `reed_w0` (rad/s) sits a couple kHz up; `reed_g` = 2·zeta·w0 is
+    // the damping; `reed_drive` scales the pressure-difference force; `reed_wflow`
+    // scales the quasi-static Bernoulli volume flow u = w·y·sign(dP)·sqrt(|dP|).
+    // Gated by `dyn_reed`; when false the classic static path runs unchanged.
+    dyn_reed: bool,
+    reed_y: f32,
+    reed_yd: f32,
+    reed_w0: f32,
+    reed_g: f32,
+    reed_y0: f32,
+    reed_comp: f32,
+    reed_wflow: f32,
+    // Output normalization for the dynamic reed: the loop is run well above the
+    // oscillation threshold (for a monotone louder-with-more-breath response),
+    // which makes its internal amplitude hot; this scales the *output copy* back
+    // to a static-comparable level without touching the loop feedback.
+    reed_norm: f32,
+
     // Lip reed (trumpet): a 2-pole mechanical resonator tuned near the note —
     // the player's buzzing lips — driving a one-way (squared) valve. `bright`
     // scales the amplitude-dependent brassiness at the output.
@@ -517,6 +538,27 @@ impl Wind {
             _ => (0.0, 0.0, 0.0, 1.0, 0.0),
         };
         let (flute_breath_bias, flute_breath_scale) = (0.87, 0.07);
+        // Dynamic-reed parameters (spike). `reed_hz` = the tip's mechanical
+        // resonance (a couple kHz — well above the played note, so it colours the
+        // upper harmonics without tracking pitch); `reed_zeta` = its damping
+        // ratio; `reed_comp` = opening-excursion scale (a fraction of the static
+        // reed table's slope — 0.5 is a shallow valve that stays open under a firm
+        // blow, so loudness rises with breath instead of choking); `reed_wflow` =
+        // the Bernoulli flow scale, set well above the oscillation threshold for a
+        // robust breath response; `reed_norm` scales the (hot) output copy back to
+        // a static-comparable RMS. Only the single-reed voices use these.
+        let (reed_hz, reed_zeta, reed_comp, reed_wflow, reed_norm) = match kind {
+            WindKind::Clarinet => (2600.0f32, 0.40f32, 0.50f32, 1.60f32, 0.22f32),
+            // Sorna: a small, stiff double reed — higher resonance, less damped
+            // so it buzzes brightly.
+            WindKind::Sorna => (3200.0, 0.32, 0.50, 1.40, 0.22),
+            WindKind::Saxophone => (2200.0, 0.42, 0.50, 1.50, 0.26),
+            WindKind::Didgeridoo => (1600.0, 0.55, 0.50, 1.50, 0.30),
+            WindKind::UilleannPipes => (2800.0, 0.38, 0.50, 1.50, 0.26),
+            _ => (2500.0, 0.45, 0.50, 1.50, 0.28),
+        };
+        let reed_w0 = core::f32::consts::TAU * reed_hz;
+        let reed_g = 2.0 * reed_zeta * reed_w0;
         Wind {
             fs,
             kind,
@@ -526,6 +568,15 @@ impl Wind {
             freq: 220.0,
             reed_offset,
             reed_slope,
+            dyn_reed: false,
+            reed_y: 0.7,
+            reed_yd: 0.0,
+            reed_w0,
+            reed_g,
+            reed_y0: 0.7,
+            reed_comp,
+            reed_wflow,
+            reed_norm,
             jet: Delay::new(max),
             jet_ratio,
             jet_refl,
@@ -900,6 +951,72 @@ impl Wind {
         r.clamp(-1.0, 1.0)
     }
 
+    /// Dynamic reed (spike): advance the one-DOF tip resonator one sample and
+    /// return the quasi-static Bernoulli volume flow injected into the bore.
+    ///
+    /// The tip is a damped mass-spring with state `(reed_y, reed_yd)`. `reed_y`
+    /// is the opening. Its equilibrium tracks the same operating point the proven
+    /// static valve settles on — `y_target = clamp(offset + slope·pdiff)`, with
+    /// `pdiff = p_bore − p_mouth` — so the reed sits open under a steady blow
+    /// instead of choking shut, but the mass-spring gives the tip real inertia:
+    /// it cannot follow `y_target` instantly, lags it, and rings near its ~kHz
+    /// resonance (`reed_w0`), which is the dynamic colour the static curve lacks.
+    /// `reed_comp` scales how hard the pressure swing drives the tip (beating
+    /// depth). The opening is floored at 0 where the reed beats shut against the
+    /// lay. Flow follows Bernoulli through the opening,
+    /// `u = wflow·y·sign(dP)·sqrt(|dP|)` with `dP = p_mouth − p_bore = −pdiff`.
+    /// Symplectic (semi-implicit) Euler keeps the audio-rate resonator stable.
+    #[inline]
+    fn dyn_reed_flow(&mut self, refl: f32, breath: f32) -> f32 {
+        let pdiff = refl - breath;
+        let dt = 1.0 / self.fs;
+        // Target opening = the static reed table's operating point (keeps the
+        // reed open under a steady blow — the DC balance the raw physical sign
+        // got wrong). `reed_comp` scales the pressure-driven excursion.
+        let mut y_target = self.reed_offset + self.reed_comp * self.reed_slope * pdiff;
+        if y_target > 1.0 {
+            y_target = 1.0;
+        }
+        // Damped mass-spring pulling the tip toward the target: inertia + a ~kHz
+        // resonance the memoryless table cannot produce.
+        let accel =
+            self.reed_w0 * self.reed_w0 * (y_target - self.reed_y) - self.reed_g * self.reed_yd;
+        self.reed_yd += accel * dt;
+        self.reed_y += self.reed_yd * dt;
+        // Beating/collision clamp: the reed cannot pass through the lay.
+        if self.reed_y < 0.0 {
+            self.reed_y = 0.0;
+            if self.reed_yd < 0.0 {
+                self.reed_yd = 0.0;
+            }
+        }
+        // Quasi-static Bernoulli volume flow through the opening. dP = −pdiff.
+        // The sqrt law is regularized as dP/sqrt(|dP|+eps): still ~sign·sqrt(|dP|)
+        // for a firm blow, but with a finite (not infinite) slope through dP=0, so
+        // the oscillation onset is a soft threshold instead of a hard jump.
+        let dp = -pdiff;
+        self.reed_wflow * self.reed_y * dp / mathf::sqrt(dp.abs() + 0.12)
+    }
+
+    /// Enable/disable the dynamic reed (spike A/B toggle). When off (default) the
+    /// classic static reed-table path runs unchanged. Resets the reed state so
+    /// the note starts from rest.
+    pub fn set_dynamic_reed(&mut self, on: bool) {
+        self.dyn_reed = on;
+        self.reed_y = self.reed_y0;
+        self.reed_yd = 0.0;
+    }
+
+    /// Override the dynamic-reed parameters (spike tuning/A-B probe). `hz` = tip
+    /// resonance, `zeta` = damping ratio, `comp` = static compliance (opening
+    /// closes by comp·dP), `wflow` = Bernoulli flow scale.
+    pub fn set_reed_params(&mut self, hz: f32, zeta: f32, comp: f32, wflow: f32) {
+        self.reed_w0 = core::f32::consts::TAU * hz;
+        self.reed_g = 2.0 * zeta * self.reed_w0;
+        self.reed_comp = comp;
+        self.reed_wflow = wflow;
+    }
+
     /// One mono sample.
     #[inline]
     pub fn process(&mut self) -> f32 {
@@ -997,10 +1114,24 @@ impl Wind {
             | WindKind::Sorna
             | WindKind::UilleannPipes => {
                 let refl = self.refl.tick(self.bore.last_out());
-                let pdiff = refl - breath;
-                let inj = pdiff * self.reed(pdiff);
-                self.flow = inj; // aperture flow → drives the turbulence
-                self.bore.tick(breath + inj)
+                if self.dyn_reed {
+                    // Dynamic reed: the tip resonator sets the opening; a
+                    // quasi-static Bernoulli flow is injected in place of the table.
+                    let inj = self.dyn_reed_flow(refl, breath);
+                    self.flow = inj;
+                    // The Bernoulli flow falls as bore pressure rises, so it feeds
+                    // the reflected wave back with the opposite sign of the static
+                    // table; subtracting restores the single loop inversion (the
+                    // quarter-wave fundamental) instead of jumping to the octave.
+                    // The bore keeps the full (hot) loop amplitude; only the output
+                    // copy is scaled to a static-comparable level.
+                    self.bore.tick(breath - inj) * self.reed_norm
+                } else {
+                    let pdiff = refl - breath;
+                    let inj = pdiff * self.reed(pdiff);
+                    self.flow = inj; // aperture flow → drives the turbulence
+                    self.bore.tick(breath + inj)
+                }
             }
             // Air jet (flute): the reflected bore pressure (DC-blocked) drives a
             // cubic jet nonlinearity through the embouchure delay, summed with

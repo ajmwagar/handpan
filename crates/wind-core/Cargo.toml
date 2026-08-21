@@ -25,6 +25,10 @@ name = "probe"
 required-features = ["std"]
 
 [[example]]
+name = "reed_ab"
+required-features = ["std"]
+
+[[example]]
 name = "render_ensemble"
 required-features = ["std"]
 
