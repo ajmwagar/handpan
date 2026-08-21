@@ -280,6 +280,10 @@ pub struct Wind {
     // the breath noise pulses *with* the tone (real turbulence is made by the
     // flow) rather than sitting on top as a steady hiss.
     flow: f32,
+    // Slow zero-mean random walk driving a few-cent pitch flutter — a real
+    // player's air is never dead-steady, and that micro-instability is a big part
+    // of why a fixed-pitch model reads as synthetic.
+    pitch_walk: f32,
     vib_phase: f32,
     vib_rate: f32,
     vib_depth: f32,
@@ -567,6 +571,7 @@ impl Wind {
             noise_lp2: 0.0,
             noise_hp: 0.0,
             flow: 0.0,
+            pitch_walk: 0.0,
             vib_phase: 0.0,
             vib_rate: 5.0,
             vib_depth: 0.0,
@@ -972,6 +977,15 @@ impl Wind {
             breath += breath * self.vib_depth * 0.1 * mathf::sin(self.vib_phase);
         }
 
+        // A few-cent pitch flutter: a slow zero-mean random walk on the bore
+        // length, so the tone breathes like real air instead of sitting on a
+        // dead-steady pitch. Peaks ~±4 cents; it averages to the true pitch, so
+        // tuning is unaffected. Set here so this sample's bore read uses it (the
+        // trumpet re-applies it with its own wave-steepening delay modulation).
+        self.pitch_walk += 0.0003 * (self.white() - self.pitch_walk);
+        let eff_delay = self.bore_delay * (1.0 - self.pitch_walk * 0.06);
+        self.bore.set_delay(eff_delay);
+
         let mut out = match self.kind {
             // Single reed (clarinet cylindrical / sax conical): the reflected
             // bore pressure drives the nonlinear reed, scattered back in. The
@@ -1034,7 +1048,7 @@ impl Wind {
                 let bl = (0.6 + 0.4 * self.bright) * self.breath_env;
                 self.brass_dc += 0.001 * (bore_out - self.brass_dc);
                 let dmod = (self.brass * bl * (bore_out - self.brass_dc)).clamp(-3.0, 3.0);
-                self.bore.set_delay(self.bore_delay - dmod);
+                self.bore.set_delay(eff_delay - dmod);
                 self.bore.tick(inj);
                 // Radiated output = bell transmission (high-shelf complement).
                 bore_out - self.bell_mix * lp
