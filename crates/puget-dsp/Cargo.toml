@@ -14,3 +14,8 @@ libm = ["dep:libm"]
 
 [dependencies]
 libm = { version = "0.2", optional = true }
+
+[[example]]
+name = "reverb_demo"
+path = "examples/reverb_demo.rs"
+required-features = ["std"]
