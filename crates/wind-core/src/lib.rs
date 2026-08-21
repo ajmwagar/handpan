@@ -164,6 +164,16 @@ pub enum WindKind {
     /// Lip reed + long drone tube, shaped by a swept vocal-tract formant — the
     /// "wah/wobble" of a didgeridoo. Circular-breathing drone; fixed low pitch.
     Didgeridoo,
+    /// Persian end-blown reed flute (**ney**): an air-jet edge tone on an open
+    /// bore — the flute's jet drive, but voiced far breathier and more
+    /// hollow/throaty, with a prominent breath-noise onset and clean register
+    /// overblowing. Intimate and vocal, clearly distinct from the concert flute.
+    Ney,
+    /// Iranian double-reed shawm (**sorna**, zurna family): the single-reed
+    /// conical loop driven by a steeper reed table, radiating strong even
+    /// harmonics through a nasal formant — very loud, bright, buzzy and nasal.
+    /// The outdoor partner to the dohol.
+    Sorna,
 }
 
 /// A wind instrument: a nonlinear reed exciter driving a bore waveguide.
@@ -314,6 +324,15 @@ impl Wind {
             // no mode-hop) rather than a mode-hopping lip — the deep drone comes
             // out reliably, then the vocal formant makes it a didgeridoo.
             WindKind::Didgeridoo => (0.7, -0.44, 1.4, 0.05),
+            // Ney: no reed table (jet drive, like the flute). Much stronger
+            // breath noise than the flute (0.14) — the ney's defining airy,
+            // throaty breath layer that reads as an intimate reed-flute.
+            WindKind::Ney => (0.0, 0.0, 1.0, 0.16),
+            // Sorna: the single-reed loop driven by a steeper reed table
+            // (slope -0.56 vs the sax's -0.50) for a harder, buzzier attack;
+            // loud output; low, focused breath noise so the buzz stays bright
+            // rather than washed out.
+            WindKind::Sorna => (0.7, -0.50, 1.9, 0.035),
         };
         // Reflection: clarinet inverts (odd-harmonic, quarter-wave); the
         // conical sax and the brass bore are effectively open (all harmonics),
@@ -343,6 +362,18 @@ impl Wind {
             // (h3) stays full and flat-topped across the register and the whole
             // brightness swing, while still self-oscillating with margin.
             WindKind::Trumpet => (0.93, 0.82),
+            // Ney: the flute's inverting jet loop, byte-for-byte in the
+            // oscillator (loss/damp, jet ratios, tune_scale, breath window) so it
+            // inherits the flute's proven register stability — a self-oscillating
+            // jet is bistable, and even a small extra loop damping tipped it into
+            // dropping the octave. The ney's hollow, breathy, throaty character
+            // comes entirely from the non-feedback stages: heavy breath noise, a
+            // vocal radiation formant, a softer top, and a long breath onset.
+            WindKind::Ney => (0.95, 0.60),
+            // Sorna: the sax's inverting single-reed loop, but brighter (damp
+            // 0.50 vs 0.57) so the odd stack stays strong and buzzy under the
+            // radiated evens — the piercing double-reed shawm color.
+            WindKind::Sorna => (0.95, 0.55),
         };
         let radiate = match kind {
             // Clarinet: presence lift restoring the sub-cutoff harmonics + a
@@ -372,12 +403,27 @@ impl Wind {
             WindKind::Didgeridoo => {
                 [Peaking::new(120.0, 0.6, 4.0, fs), Peaking::new(4000.0, 0.7, -4.0, fs)]
             }
+            // Ney: a throaty vocal formant (~850 Hz lift) for the hollow,
+            // breathy body, plus a soft high cut — airy and intimate rather
+            // than the flute's brighter, purer edge tone.
+            WindKind::Ney => {
+                [Peaking::new(850.0, 1.0, 5.0, fs), Peaking::new(3200.0, 0.8, -5.0, fs)]
+            }
+            // Sorna: the nasal shawm "bark" — a strong midrange formant (~1.5 kHz)
+            // and an upper-presence lift (~2.8 kHz) that give the double reed its
+            // piercing, buzzy, nasal projection.
+            WindKind::Sorna => {
+                [Peaking::new(1500.0, 1.4, 10.0, fs), Peaking::new(2800.0, 1.1, 6.0, fs)]
+            }
         };
         // Flute jet parameters (jet_ratio, jet_refl, end_refl, tune_scale,
         // tune_off) and its breath window (bias, scale). tune_scale corrects the
         // jet-drive pitch (empirical for jet_ratio 0.30 + damp 0.60).
         let (jet_ratio, jet_refl, end_refl, tune_scale, tune_off) = match kind {
             WindKind::Flute => (0.30, 0.5, 0.5, 1.542, 0.0),
+            // Ney: the same jet embouchure and tuning as the flute (identical
+            // oscillator core → identical, proven pitch and register stability).
+            WindKind::Ney => (0.30, 0.5, 0.5, 1.542, 0.0),
             _ => (0.0, 0.0, 0.0, 1.0, 0.0),
         };
         let (flute_breath_bias, flute_breath_scale) = (0.87, 0.07);
@@ -474,6 +520,12 @@ impl Wind {
                     WindKind::Saxophone => 3500.0,
                     WindKind::Trumpet => 3000.0,
                     WindKind::Didgeridoo => 3500.0,
+                    // Ney: soften the top so the tone stays hollow/intimate; the
+                    // breath noise still carries the air up top.
+                    WindKind::Ney => 6500.0,
+                    // Sorna: a high cutoff — the shawm's buzz and nasal upper
+                    // harmonics must project, so keep the top open.
+                    WindKind::Sorna => 5000.0,
                 };
                 mathf::exp(-core::f32::consts::TAU * fc / fs)
             },
@@ -507,11 +559,16 @@ impl Wind {
             WindKind::Trumpet => self.fs / self.freq - fgd + self.tune_trim,
             // Didgeridoo drone: quarter-wave lip-tube (a low, lossy pipe).
             WindKind::Didgeridoo => self.fs / self.freq * 0.5 - 1.0 - fgd,
+            // Ney: open-open jet bore, exactly like the flute (its own tune_scale).
+            WindKind::Ney => self.fs / self.freq * self.tune_scale - self.tune_off - 1.0 - fgd,
+            // Sorna: conical bore on the quarter-wave single-reed loop (like the
+            // sax); the even harmonics are radiated at the output, not by the bore.
+            WindKind::Sorna => self.fs / self.freq * 0.5 - 1.0 - fgd,
         };
         let d = d.max(4.0);
         self.bore_delay = d;
         self.bore.set_delay(d);
-        if self.kind == WindKind::Flute {
+        if matches!(self.kind, WindKind::Flute | WindKind::Ney) {
             self.jet.set_delay((d * self.jet_ratio).max(1.0));
         }
         if self.kind == WindKind::Trumpet {
@@ -549,6 +606,11 @@ impl Wind {
         let ms = match self.kind {
             WindKind::Saxophone => 0.06,
             WindKind::Clarinet => 0.025,
+            // Ney: a long, prominent breath-noise onset — the airy "haa" of an
+            // end-blown flute catching the edge. The defining attack of the voice.
+            WindKind::Ney => 0.09,
+            // Sorna: a short, hard double-reed chiff.
+            WindKind::Sorna => 0.035,
             _ => 0.0,
         };
         self.onset_len = (ms * self.fs).max(1.0);
@@ -592,6 +654,15 @@ impl Wind {
             // Circular-breathing drone: steady pressure in the reed's sweet spot
             // — enough to keep the low reed oscillating, not so much it chokes.
             WindKind::Didgeridoo => 0.60 + 0.16 * b,
+            // Ney: the flute's exact jet blowing window — a self-oscillating jet
+            // is register-bistable, so the ney reuses the flute's proven-stable
+            // window verbatim. Breathiness comes from the heavy breath noise, not
+            // from a wider/lower (unstable) window.
+            WindKind::Ney => self.flute_breath_bias + self.flute_breath_scale * b,
+            // Sorna: blown hard, but the steeper reed's stable window closes off
+            // sooner than the sax's — top out at ~0.55 so full breath stays the
+            // loudest point while the reed keeps oscillating across the register.
+            WindKind::Sorna => 0.30 + 0.28 * b,
         };
     }
 
@@ -657,6 +728,12 @@ impl Wind {
             // Moves the bell cutoff (brighter = higher cutoff = smaller g).
             WindKind::Trumpet => 0.87 - 0.10 * a,
             WindKind::Didgeridoo => 0.55,
+            // Ney: the flute's exact narrow damp swing — keeps the jet oscillator
+            // identical to the flute's (proven register stability).
+            WindKind::Ney => 0.64 - 0.08 * a,
+            // Sorna: opens toward a hard, buzzy double-reed embouchure; brighter
+            // than the sax at every setting so the nasal buzz stays present.
+            WindKind::Sorna => 0.63 - 0.16 * a,
         };
         // Timbre also biases the didgeridoo's vocal-formant centre (mouth shape).
         if self.kind == WindKind::Didgeridoo {
@@ -734,7 +811,7 @@ impl Wind {
             // Single reed (clarinet cylindrical / sax conical): the reflected
             // bore pressure drives the nonlinear reed, scattered back in. The
             // clarinet's loop inverts (odd harmonics); the sax's does not (all).
-            WindKind::Clarinet | WindKind::Saxophone | WindKind::Didgeridoo => {
+            WindKind::Clarinet | WindKind::Saxophone | WindKind::Didgeridoo | WindKind::Sorna => {
                 let refl = self.refl.tick(self.bore.last_out());
                 let pdiff = refl - breath;
                 self.bore.tick(breath + pdiff * self.reed(pdiff))
@@ -742,7 +819,7 @@ impl Wind {
             // Air jet (flute): the reflected bore pressure (DC-blocked) drives a
             // cubic jet nonlinearity through the embouchure delay, summed with
             // the end reflection back into the open bore. All harmonics.
-            WindKind::Flute => {
+            WindKind::Flute | WindKind::Ney => {
                 let filt = self.refl.tick(self.bore.last_out());
                 let temp = filt - self.jdc_x1 + 0.995 * self.jdc_y1;
                 self.jdc_x1 = filt;
@@ -799,6 +876,10 @@ impl Wind {
             WindKind::Clarinet => 0.09,
             WindKind::Saxophone => 2.6,
             WindKind::Didgeridoo => 0.5, // fill the buzzy all-harmonic drone
+            // Sorna: strong evens turn the odd-only reed loop into a full,
+            // all-harmonic double reed. Uses the raw squared term (not the sax's
+            // fundamental-biased copy) so the upper cross-products add buzz.
+            WindKind::Sorna => 2.0,
             _ => 0.0,
         };
         if even_amt > 0.0 {
@@ -1298,5 +1379,123 @@ mod tests {
                 "{kind:?} missing even harmonics: h1={h1:.3} h2={h2:.3} h3={h3:.3}"
             );
         }
+    }
+
+    #[test]
+    fn ney_and_sorna_sound_and_stop() {
+        // Both new Persian voices must self-oscillate cleanly (finite, audible,
+        // no runaway) and die away after note_off — mirroring the reed voices.
+        let fs = 48_000.0;
+        // Ney blown in its stable range (C4/E4/G4); sorna across its register.
+        for &(kind, f0) in &[
+            (WindKind::Ney, 293.66f32),   // D4
+            (WindKind::Ney, 392.0),       // G4
+            (WindKind::Sorna, 196.0),     // G3
+            (WindKind::Sorna, 293.66),    // D4
+        ] {
+            let mut v = Wind::new(fs, kind);
+            v.note_on(f0, 0.9);
+            let mut peak = 0.0f32;
+            for i in 0..fs as usize {
+                let s = v.process();
+                assert!(s.is_finite(), "{kind:?} non-finite");
+                if i > fs as usize / 2 {
+                    peak = peak.max(s.abs());
+                }
+            }
+            assert!(peak > 0.01, "{kind:?} @ {f0} did not sound: {peak}");
+            assert!(peak < 20.0, "{kind:?} @ {f0} runaway: {peak}");
+            v.note_off();
+            for _ in 0..fs as usize {
+                v.process();
+            }
+            let mut tail = 0.0f32;
+            for _ in 0..4_800 {
+                tail = tail.max(v.process().abs());
+            }
+            assert!(tail < peak, "{kind:?} @ {f0} did not stop");
+        }
+    }
+
+    #[test]
+    fn ney_and_sorna_in_tune() {
+        // Pitch accuracy across a couple of pitches each, like the sax/trumpet
+        // tuning test. The ney is a jet edge tone: it holds its register cleanly
+        // across C4 and up (its musical range); the sorna is a single-reed loop
+        // stable across its whole register.
+        let fs = 48_000.0;
+        // (kind, f0, breath) — the ney is voiced for C4-up, blown near full air.
+        let cases: &[(WindKind, f32, f32)] = &[
+            (WindKind::Ney, 261.63, 0.9),   // C4
+            (WindKind::Ney, 349.23, 0.9),   // F4
+            (WindKind::Ney, 440.0, 0.9),    // A4
+            (WindKind::Ney, 523.25, 0.9),   // C5
+            (WindKind::Sorna, 146.83, 0.85), // D3
+            (WindKind::Sorna, 196.0, 0.85),  // G3
+            (WindKind::Sorna, 293.66, 0.85), // D4
+            (WindKind::Sorna, 392.0, 0.85),  // G4
+        ];
+        for &(kind, f0, breath) in cases {
+            let mut v = Wind::new(fs, kind);
+            v.set_brightness(0.5);
+            v.note_on(f0, breath);
+            let f = measured_hz(&mut v, fs, 24_000, 16_384);
+            let cents = 1200.0 * (f / f0).log2();
+            assert!(cents.abs() < 25.0, "{kind:?} {f0}Hz off by {cents:.1} cents ({f:.1})");
+        }
+    }
+
+    #[test]
+    fn ney_and_sorna_audible_across_breath() {
+        // Both voices must produce audible output across the usable breath range,
+        // not only at one pressure. The ney (jet) speaks even at soft air; the
+        // sorna (reed) needs a minimum pressure to start, so its range begins a
+        // little above zero — sweep from there up.
+        let fs = 48_000.0;
+        let ney_breaths = [0.2f32, 0.4, 0.6, 0.8, 1.0];
+        let sorna_breaths = [0.35f32, 0.55, 0.75, 1.0];
+        for &(kind, f0, breaths) in &[
+            (WindKind::Ney, 392.0f32, &ney_breaths[..]),
+            (WindKind::Sorna, 261.63, &sorna_breaths[..]),
+        ] {
+            for &breath in breaths {
+                let mut v = Wind::new(fs, kind);
+                v.set_brightness(0.5);
+                v.note_on(f0, breath);
+                for _ in 0..24_000 {
+                    v.process();
+                }
+                let buf: Vec<f32> = (0..16_384).map(|_| v.process()).collect();
+                let rms = (buf.iter().map(|x| x * x).sum::<f32>() / buf.len() as f32).sqrt();
+                assert!(rms.is_finite(), "{kind:?} non-finite at breath {breath}");
+                assert!(
+                    rms > 0.05,
+                    "{kind:?} inaudible at breath {breath}: rms {rms:.4}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sorna_is_bright_and_all_harmonic() {
+        // The double-reed shawm must radiate strong even harmonics (like the sax)
+        // — a buzzy, all-harmonic tone, not the clarinet's odd-only hollow one.
+        let fs = 48_000.0;
+        let f0 = 261.63f32;
+        let mut v = Wind::new(fs, WindKind::Sorna);
+        v.set_brightness(0.6);
+        v.note_on(f0, 0.9);
+        for _ in 0..24_000 {
+            v.process();
+        }
+        let buf: Vec<f32> = (0..16_384).map(|_| v.process()).collect();
+        let h1 = harmonic(&buf, f0, 1.0, fs);
+        let h2 = harmonic(&buf, f0, 2.0, fs);
+        let h3 = harmonic(&buf, f0, 3.0, fs);
+        let strongest = h1.max(h3).max(1e-9);
+        assert!(
+            h2 > 0.1 * strongest,
+            "sorna missing even harmonics: h1={h1:.3} h2={h2:.3} h3={h3:.3}"
+        );
     }
 }

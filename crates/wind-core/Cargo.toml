@@ -35,3 +35,11 @@ required-features = ["std"]
 [[example]]
 name = "render_sax"
 required-features = ["std"]
+
+[[example]]
+name = "render_ney"
+required-features = ["std"]
+
+[[example]]
+name = "render_sorna"
+required-features = ["std"]
