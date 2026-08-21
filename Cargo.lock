@@ -592,6 +592,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "puget-plugin"
+version = "0.1.0"
+dependencies = [
+ "bowed-core",
+ "drum-core",
+ "handpan-core",
+ "mallet-core",
+ "nih_plug",
+ "plucked-core",
+ "puget-dsp",
+ "wind-core",
+]
+
+[[package]]
 name = "puremp3"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
