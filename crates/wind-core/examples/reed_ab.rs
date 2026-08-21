@@ -348,6 +348,86 @@ fn render_wav(kind: WindKind, dynamic: bool, path: &str) {
     println!("wrote {path}");
 }
 
+/// Sorna hardening probe: brightness→spectrum, register×breath peak (clip check),
+/// and an attack-transient check. Uses the DEFAULT construction (dynamic reed on).
+fn sorna_harden() {
+    let kind = WindKind::Sorna;
+    // (a) brightness sweep: h1..h8 + h2-vs-strongest ratio (the all-harmonic test).
+    println!("brightness sweep  m60 (C4), breath 0.9   (h1..8 dB rel strongest; h2/strong ratio)");
+    for i in 0..=10 {
+        let a = i as f32 / 10.0;
+        let f0 = midi_hz(60.0);
+        let mut v = Wind::new(FS, kind);
+        v.set_brightness(a);
+        v.note_on(f0, 0.9);
+        let n = (1.2 * FS) as usize;
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            out.push(v.process());
+        }
+        let win = &out[(0.5 * FS) as usize..];
+        let db = harmonics_db(win, f0);
+        // Absolute h1/h2/h3 magnitudes for the ratio the unit test uses.
+        let h1 = goertzel(win, f0, FS);
+        let h2 = goertzel(win, f0 * 2.0, FS);
+        let h3 = goertzel(win, f0 * 3.0, FS);
+        let ratio = h2 / h1.max(h3).max(1e-9);
+        print!("  br{:.1} | ", a);
+        for k in 0..8 {
+            print!("{:4.0} ", db[k]);
+        }
+        println!("| h2/strong {:.3} {}", ratio, if ratio > 0.1 { "PASS" } else { "FAIL" });
+    }
+    // (b) register x breath peak (pre-normalization clip check).
+    println!("\nregister x breath PEAK (want < ~1.0)   brightness 0.6");
+    let midis = [55.0f32, 60.0, 64.0, 67.0, 72.0, 76.0, 79.0, 83.0];
+    let breaths = [0.35f32, 0.55, 0.75, 0.9, 1.0];
+    print!("  midi\\breath");
+    for b in breaths {
+        print!("  {:.2} ", b);
+    }
+    println!();
+    for &m in &midis {
+        let f0 = midi_hz(m);
+        print!("  m{:<3}     ", m as i32);
+        for &b in &breaths {
+            let mut v = Wind::new(FS, kind);
+            v.set_brightness(0.6);
+            v.note_on(f0, b);
+            let n = (1.0 * FS) as usize;
+            let mut pk = 0.0f32;
+            for _ in 0..n {
+                pk = pk.max(v.process().abs());
+            }
+            print!(" {:.2} ", pk);
+        }
+        println!();
+    }
+    // (c) attack transient: onset peak (first 30 ms) vs steady peak (0.5..1.0 s).
+    println!("\nattack transient (onset-pk / steady-pk should be ~1, not a spike)  brightness 0.6");
+    for &m in &[55.0f32, 62.0, 67.0, 74.0, 79.0] {
+        let f0 = midi_hz(m);
+        let mut v = Wind::new(FS, kind);
+        v.set_brightness(0.6);
+        v.note_on(f0, 0.9);
+        let mut onset_pk = 0.0f32;
+        let mut steady_pk = 0.0f32;
+        for i in 0..(1.0 * FS) as usize {
+            let s = v.process().abs();
+            if (i as f32) < 0.03 * FS {
+                onset_pk = onset_pk.max(s);
+            }
+            if (i as f32) > 0.5 * FS {
+                steady_pk = steady_pk.max(s);
+            }
+        }
+        println!(
+            "  m{:<3} onset-pk {:.3}  steady-pk {:.3}  ratio {:.2}",
+            m as i32, onset_pk, steady_pk, onset_pk / steady_pk.max(1e-9)
+        );
+    }
+}
+
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "both".into());
     match mode.as_str() {
@@ -367,6 +447,7 @@ fn main() {
             println!();
             breath_probe(WindKind::Sorna, 67.0, 3200.0, 0.32);
         }
+        "sorna" => sorna_harden(),
         "wav" => {
             let dir = std::env::args().nth(2).unwrap_or_else(|| ".".into());
             render_wav(WindKind::Clarinet, false, &format!("{dir}/clarinet_static.wav"));

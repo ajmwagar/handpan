@@ -390,11 +390,12 @@ impl Wind {
             // breath noise than the flute (0.14) — the ney's defining airy,
             // throaty breath layer that reads as an intimate reed-flute.
             WindKind::Ney => (0.0, 0.0, 1.0, 0.16),
-            // Sorna: the single-reed loop driven by a steeper reed table
-            // (slope -0.56 vs the sax's -0.50) for a harder, buzzier attack;
-            // loud output; low, focused breath noise so the buzz stays bright
-            // rather than washed out.
-            WindKind::Sorna => (0.7, -0.50, 1.9, 0.035),
+            // Sorna: single-reed loop, low/focused breath noise so the buzz stays
+            // bright. Output gain trimmed (1.9 → 1.0) for the dynamic reed's higher
+            // crest factor — the beating tip plus the boosted even term make sharp
+            // peaks, so the nominal gain is lowered to keep the full-breath peak
+            // under ~1.0 across the register (no clipping pre-normalization).
+            WindKind::Sorna => (0.7, -0.50, 1.0, 0.035),
             // Tin whistle: no reed table (jet drive, like the flute). Low breath
             // noise — the penny whistle is pure and clean, not airy like the ney
             // (0.16) or the concert flute (0.14).
@@ -568,7 +569,10 @@ impl Wind {
             freq: 220.0,
             reed_offset,
             reed_slope,
-            dyn_reed: false,
+            // The sorna ships on the dynamic reed by default (validated: brighter,
+            // buzzier, and stable — see the spike report). Every other voice stays
+            // on the static path until individually validated.
+            dyn_reed: matches!(kind, WindKind::Sorna),
             reed_y: 0.7,
             reed_yd: 0.0,
             reed_w0,
@@ -801,6 +805,12 @@ impl Wind {
         if self.kind == WindKind::Saxophone {
             self.bloom = 0.0;
         }
+        // Dynamic reed: start the tip from rest so a re-trigger can't carry stale
+        // velocity into the new note (a click / brief blowup).
+        if self.dyn_reed {
+            self.reed_y = self.reed_y0;
+            self.reed_yd = 0.0;
+        }
     }
 
     /// Sax growl (expression): a gentle sub-audio amplitude flutter. `depth`
@@ -924,8 +934,12 @@ impl Wind {
             // Ney: the flute's exact narrow damp swing — keeps the jet oscillator
             // identical to the flute's (proven register stability).
             WindKind::Ney => 0.64 - 0.08 * a,
-            // Sorna: opens toward a hard, buzzy double-reed embouchure; brighter
-            // than the sax at every setting so the nasal buzz stays present.
+            // Sorna: the dynamic reed already generates a rich, buzzy harmonic
+            // stack on its own, so its brightness knob sweeps a NARROWER, DARKER
+            // loop-damp range than the static reed's — keeping the loop dark lets
+            // the reed's inherent brightness read as body across 0..1 instead of
+            // going harsh/thin at the top. (The static path keeps the old range.)
+            WindKind::Sorna if self.dyn_reed => 0.74 - 0.12 * a,
             WindKind::Sorna => 0.63 - 0.16 * a,
             // Tin whistle & Irish flute: the flute's exact narrow damp swing —
             // keeps the jet oscillator identical to the flute's (proven register
@@ -1197,7 +1211,11 @@ impl Wind {
             WindKind::Didgeridoo => 0.5, // fill the buzzy all-harmonic drone
             // Sorna: strong evens turn the odd-only reed loop into a full,
             // all-harmonic double reed. Uses the raw squared term (not the sax's
-            // fundamental-biased copy) so the upper cross-products add buzz.
+            // fundamental-biased copy) so the upper cross-products add buzz. The
+            // dynamic reed runs at a lower (normalized) output level, so its
+            // squared term needs a larger coefficient to radiate the same 2nd
+            // harmonic — the buzzy "all-harmonic" balance the static reed had.
+            WindKind::Sorna if self.dyn_reed => 6.0,
             WindKind::Sorna => 2.0,
             // Uilleann chanter: strong evens turn the odd-only reed loop into the
             // sweet, nasal, all-harmonic chanter — a touch less than the sorna so
