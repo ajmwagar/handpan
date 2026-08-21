@@ -159,6 +159,13 @@ pub enum StringKind {
     /// vocal tone quite unlike the wooden violin. Bowed with a variable-tension
     /// horsehair bow; violin-ish register.
     Kamancheh,
+    /// The Irish/traditional **fiddle**: physically the same instrument as the
+    /// violin, GDAE tuning and all, but voiced for the trad repertoire —
+    /// brighter, more open and raw than a refined solo violin, with a touch more
+    /// bow-grip grit and a body that leans a little edgier. Built for driving
+    /// reels and jigs over open-string drones and double stops, not for a
+    /// covered concert-hall tone.
+    Fiddle,
 }
 
 impl StringKind {
@@ -176,6 +183,9 @@ impl StringKind {
             // G3 D4 A4 D5 — a common Persian tuning (fifths + a fourth),
             // violin-ish range.
             StringKind::Kamancheh => [196.00, 293.66, 440.00, 587.33],
+            // G3 D4 A4 E5 — identical to the violin; the fiddle is the same
+            // instrument, tuned the same way.
+            StringKind::Fiddle => [196.00, 293.66, 440.00, 659.25],
         }
     }
     /// String loss pole (higher = darker) and default bow position.
@@ -188,6 +198,10 @@ impl StringKind {
             // Thin gut/steel strings on a small body; bowed near the bridge for
             // the bright, reedy kamancheh voice.
             StringKind::Kamancheh => (0.54, 0.14),
+            // Same body as the violin, but a brighter (lower) loss pole and a
+            // bow parked a touch closer to the bridge for the open, raw,
+            // grittier folk-fiddle attack.
+            StringKind::Fiddle => (0.51, 0.15),
         }
     }
 
@@ -216,6 +230,9 @@ impl StringKind {
             StringKind::Bass => (2.9, 4.6),
             // Light and small like the violin, so it grips at a low slope.
             StringKind::Kamancheh => (1.6, 3.4),
+            // A violin body; grips hard and digs in for the driving trad
+            // attack — a hair wider capture than the violin at full pressure.
+            StringKind::Fiddle => (1.45, 3.5),
         }
     }
     /// Frequency scale applied to the violin body-mode template. (The bass uses
@@ -229,6 +246,10 @@ impl StringKind {
             StringKind::Cello => 0.52,
             StringKind::Bass => 0.20, // unused (bass has its own table)
             StringKind::Kamancheh => 1.0, // unused (kamancheh has its own table)
+            // The fiddle reuses the violin body template, nudged ~5% up in
+            // frequency so the wood cluster and bridge hill sit a little
+            // brighter and edgier than a covered solo-violin tone.
+            StringKind::Fiddle => 1.05,
         }
     }
     /// String-loop DC gain (< 1). Sets how long the string rings down once the
@@ -238,6 +259,9 @@ impl StringKind {
     fn loop_gain(self) -> f32 {
         match self {
             StringKind::Kamancheh => 0.972,
+            // Rings much like a violin, with a touch more singing tail to keep
+            // open-string drones alive under the tune.
+            StringKind::Fiddle => 0.955,
             _ => 0.95,
         }
     }
@@ -404,7 +428,12 @@ impl BowString {
             vib_depth: 0.0,
             rng: 0x1234_5678 ^ seed.wrapping_mul(0x9E37_79B9),
             noise_lp: 0.0,
-            noise_amt: 0.12,
+            // The fiddle carries a touch more bow-grip noise baked in for its
+            // raw, open trad grit; every other kind keeps its calibrated 0.12.
+            noise_amt: match kind {
+                StringKind::Fiddle => 0.16,
+                _ => 0.12,
+            },
             attack: 0,
             pluck_rem: 0,
             pluck_amp: 0.0,
@@ -899,6 +928,22 @@ mod tests {
         let f = measured_hz(&mut k, fs, 8_000, 8_192);
         let cents = 1200.0 * (f / 392.0).log2();
         assert!(cents.abs() < 15.0, "kamancheh G4 off by {cents:.1} cents ({f:.1} Hz)");
+    }
+
+    #[test]
+    fn fiddle_sounds_and_is_in_tune() {
+        let fs = 48_000.0;
+        let mut f = Bowed::new(fs, StringKind::Fiddle);
+        f.note_on(440.0, 0.7, 0.5); // A4 (open A)
+        // It self-oscillates to an audible level.
+        let mut peak = 0.0f32;
+        for _ in 0..24_000 {
+            peak = peak.max(f.process().abs());
+        }
+        assert!(peak > 0.02, "fiddle too quiet: {peak}");
+        let hz = measured_hz(&mut f, fs, 8_000, 8_192);
+        let cents = 1200.0 * (hz / 440.0).log2();
+        assert!(cents.abs() < 15.0, "fiddle A4 off by {cents:.1} cents ({hz:.1} Hz)");
     }
 
     #[test]

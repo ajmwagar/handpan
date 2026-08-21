@@ -27,3 +27,7 @@ required-features = ["std"]
 [[example]]
 name = "render_kamancheh"
 required-features = ["std"]
+
+[[example]]
+name = "render_fiddle"
+required-features = ["std"]
