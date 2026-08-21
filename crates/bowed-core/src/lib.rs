@@ -235,6 +235,40 @@ impl StringKind {
             StringKind::Fiddle => (1.45, 3.5),
         }
     }
+    /// Bow-force → string-loop brightening depth: how far the loss-filter pole
+    /// is lowered (loop made brighter) as bow force rises 0→1. A firm bow keeps
+    /// the upper harmonics ringing in the loop instead of damping them away, so
+    /// the steady-state tone gains bridge-hill sparkle under load rather than
+    /// going dull. Kept below the point where the loop's high-frequency gain
+    /// nears unity (it can't — loop DC gain < 1 and the one-pole only attenuates
+    /// — so this stays a stable, purely timbral lift).
+    fn bow_bright_depth(self) -> f32 {
+        match self {
+            StringKind::Violin => 0.13,
+            StringKind::Viola => 0.11,
+            StringKind::Cello => 0.12,
+            StringKind::Bass => 0.10,
+            StringKind::Kamancheh => 0.11,
+            StringKind::Fiddle => 0.14,
+        }
+    }
+    /// Bow-force → bridge-radiation emphasis depth: the high-shelf gain applied
+    /// to the *output* (feed-forward) bridge signal at full bow force. Lifts the
+    /// radiated upper harmonics / bridge-hill region under firm bow to close the
+    /// remaining dullness the in-loop brightening can't reach without
+    /// destabilizing — kept modest so the bow-friction noise floor stays put.
+    /// Lighter for the darker, low instruments (cello/bass), which sound harsh
+    /// if the top is pushed as hard as the violin.
+    fn bow_emph_depth(self) -> f32 {
+        match self {
+            StringKind::Violin => 1.3,
+            StringKind::Viola => 1.2,
+            StringKind::Cello => 0.85,
+            StringKind::Bass => 0.55,
+            StringKind::Kamancheh => 1.3,
+            StringKind::Fiddle => 1.5,
+        }
+    }
     /// Frequency scale applied to the violin body-mode template. (The bass uses
     /// its own table instead — see [`Body::new`].)
     fn body_scale(self) -> f32 {
@@ -374,6 +408,12 @@ struct BowString {
     string_filter: OnePole,
     bow_pos: f32,
     base_delay: f32,
+    // Fundamental (Hz) and its cached sin/cos of the per-sample radian frequency,
+    // used to compensate the loss-filter's phase delay in the loop length so the
+    // pitch holds as bow force brightens the pole (see `retune`).
+    freq: f32,
+    w_sin: f32,
+    w_cos: f32,
     // Bow control (slewed so attacks/releases aren't clicks).
     max_vel_target: f32,
     vel_env: f32,
@@ -390,6 +430,11 @@ struct BowString {
     // Friction-slope endpoints (full-pressure, zero-pressure) for this kind.
     slope_lo: f32,
     slope_hi: f32,
+    // String loss-filter pole at zero bow force (the "dark" base, from
+    // string_def) and how far bow force brightens it. `set_bow` lowers the pole
+    // toward `pole_dark - bright_depth` as pressure rises.
+    pole_dark: f32,
+    bright_depth: f32,
     // Vibrato.
     vib_phase: f32,
     vib_rate: f32,
@@ -399,6 +444,14 @@ struct BowString {
     noise_lp: f32,
     noise_amt: f32,
     attack: u32,
+    // Feed-forward bridge-radiation emphasis: a one-pole high-shelf on the
+    // *output* copy of the bridge signal (never fed back), lifted by bow force.
+    // It brightens the radiated tone under firm bow without touching the
+    // waveguide loop, so it can neither detune nor destabilize the oscillator —
+    // a stand-in for the extra bridge-hill energy a real sharper corner radiates.
+    emph_lp: f32,
+    emph_gain: f32,
+    emph_depth: f32,
     // Pizzicato excitation.
     pluck_rem: u32,
     pluck_amp: f32,
@@ -416,6 +469,9 @@ impl BowString {
             string_filter: OnePole::new(pole, kind.loop_gain()),
             bow_pos,
             base_delay: 100.0,
+            freq: 440.0,
+            w_sin: 0.0,
+            w_cos: 1.0,
             max_vel_target: 0.0,
             vel_env: 0.0,
             contact: 0.0,
@@ -423,6 +479,8 @@ impl BowString {
             slope: 3.0,
             slope_lo,
             slope_hi,
+            pole_dark: pole,
+            bright_depth: kind.bow_bright_depth(),
             vib_phase: 0.0,
             vib_rate: 5.5,
             vib_depth: 0.0,
@@ -435,16 +493,36 @@ impl BowString {
                 _ => 0.12,
             },
             attack: 0,
+            emph_lp: 0.0,
+            emph_gain: 0.0,
+            emph_depth: kind.bow_emph_depth(),
             pluck_rem: 0,
             pluck_amp: 0.0,
         }
     }
 
     fn set_freq(&mut self, freq: f32) {
-        // Loop length accounts for the loss filter + last_out() cache phase
-        // delay (~3.2 samples) so the pitch doesn't run flat.
-        self.base_delay = (self.fs / freq - 3.2).max(4.0);
+        self.freq = freq;
+        let w = core::f32::consts::TAU * freq / self.fs;
+        self.w_sin = mathf::sin(w);
+        self.w_cos = mathf::cos(w);
+        // Nominal loop length; `retune` subtracts the pole-dependent phase-delay
+        // compensation, so `base_delay` stays the pure ideal length here.
+        self.base_delay = self.fs / freq;
         self.retune(0.0);
+    }
+
+    /// Phase delay (in samples) a one-pole loss filter with pole `p` adds at the
+    /// fundamental. Folded out of the loop length so brightening the pole (which
+    /// shortens this delay) doesn't sharpen the pitch.
+    #[inline]
+    fn phase_delay(&self, p: f32) -> f32 {
+        if p <= 0.0 {
+            return 0.0;
+        }
+        let w = core::f32::consts::TAU * self.freq / self.fs;
+        // phase delay = atan(p*sin w / (1 - p*cos w)) / w
+        mathf::atan(p * self.w_sin / (1.0 - p * self.w_cos)) / w
     }
 
     #[inline]
@@ -457,7 +535,12 @@ impl BowString {
 
     #[inline]
     fn retune(&mut self, vib: f32) {
-        let d = self.base_delay * (1.0 + vib);
+        // Keep the historical 3.2-sample compensation at the dark (default) pole
+        // for exact tuning parity, and correct only the *change* in loss-filter
+        // phase delay as bow force brightens the pole — so brightening no longer
+        // sharpens the pitch.
+        let comp = 3.2 + (self.phase_delay(self.string_filter.pole) - self.phase_delay(self.pole_dark));
+        let d = (self.base_delay * (1.0 + vib) - comp).max(4.0);
         self.bridge.set_delay(d * self.bow_pos);
         self.neck.set_delay(d * (1.0 - self.bow_pos));
     }
@@ -488,6 +571,14 @@ impl BowString {
         // slope) endpoint down to its full-pressure (loud, low slope) endpoint.
         let p = bow_pressure.clamp(0.0, 1.0);
         self.slope = self.slope_hi + (self.slope_lo - self.slope_hi) * p;
+        // Brighten the string loop with bow force: lower the loss-filter pole so
+        // the upper harmonics the corner generates keep ringing instead of being
+        // damped away — the direct cure for the dull-under-load spectrum.
+        self.string_filter.pole = (self.pole_dark - self.bright_depth * p).max(0.05);
+        // Feed-forward radiation emphasis rises with bow force (see `emph_*`).
+        self.emph_gain = self.emph_depth * p;
+        // The pole moved, so recompute the loop length's phase-delay compensation.
+        self.retune(0.0);
     }
 
     fn set_bow_position(&mut self, pos: f32) {
@@ -499,6 +590,8 @@ impl BowString {
         let a = amount.clamp(0.0, 1.0);
         self.string_filter.pole = 0.72 - 0.30 * a;
         self.noise_amt = 0.06 + 0.14 * a;
+        // Keep tuning honest as the loss-filter pole moves.
+        self.retune(0.0);
     }
 
     fn set_vibrato(&mut self, rate_hz: f32, depth: f32) {
@@ -564,7 +657,14 @@ impl BowString {
         let new_vel = delta * bow_friction(delta, self.slope) * self.contact;
         self.neck.tick(bridge_refl + new_vel);
         self.bridge.tick(nut_refl + new_vel);
-        self.bridge.last_out()
+        // Feed-forward high-shelf on an OUTPUT COPY of the bridge signal (the loop
+        // above already read `last_out()` for its reflections and is untouched):
+        // one-pole low-pass (~1 kHz corner), then add back the high-passed
+        // remainder scaled by the bow-force emphasis gain. Purely radiative, so
+        // it cannot affect tuning or stability.
+        let out = self.bridge.last_out();
+        self.emph_lp += 0.12 * (out - self.emph_lp);
+        out + self.emph_gain * (out - self.emph_lp)
     }
 }
 

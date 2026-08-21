@@ -31,3 +31,7 @@ required-features = ["std"]
 [[example]]
 name = "render_fiddle"
 required-features = ["std"]
+
+[[example]]
+name = "spike_measure"
+required-features = ["std"]
