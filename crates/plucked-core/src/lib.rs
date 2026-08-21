@@ -10,7 +10,13 @@
 //! - the **[`Santur`]** — the Persian trapezoidal hammered dulcimer: courses of
 //!   near-unison steel strings *struck* by a mallet into a shimmering chorus,
 //! - the **[`Tar`]** — the Persian long-neck lute: doubled courses plucked with
-//!   a brass plectrum over a bright, nasal *skin-membrane* top.
+//!   a brass plectrum over a bright, nasal *skin-membrane* top,
+//! - the **[`Setar`]** — the small, delicate Persian long-neck lute: thin
+//!   strings plucked with the index *fingernail* over a warm mulberry-wood box,
+//!   with a sympathetic bass string humming beneath (soft, warm, intimate),
+//! - the **[`Barbat`]** — the Persian *oud*: a short-neck **fretless** lute,
+//!   nylon/gut courses plucked with a *risha* over a big, deep wooden bowl,
+//!   with a signature pitch **glide** between notes (warm, bass-heavy, round).
 //!
 //! Each string is an extended **Karplus-Strong** waveguide — a fractional delay
 //! line closed by a loss/damping filter, excited by a noise burst — upgraded
@@ -1219,6 +1225,416 @@ impl Tar {
     }
 }
 
+/// The **setar**: a small, delicate Persian long-neck lute. Where the tar is
+/// loud and bright over a stretched skin membrane, the setar is intimate and
+/// warm — a light mulberry-wood soundbox plucked not with a plectrum but the
+/// player's index **fingernail**, a gentler, darker attack. It carries four
+/// thin strings; the lowest is a bass **doubling** that mostly rings
+/// *sympathetically*, adding a soft halo under the melody rather than being
+/// played on its own.
+///
+/// A modular voice maps onto it as a small **pool of melody strings** (each
+/// pluck allocates the next, so notes bloom into one another) plus a single
+/// tuned **sympathetic bass string** that is set humming through the shared
+/// bridge (the same melody→drone coupling as the [`Cifteli`]). The body is
+/// modeled with **low, mellow** wooden resonances — warmer and darker than the
+/// tar's bright, nasal skin top. Feed it already-quantized pitches (e.g. from a
+/// dastgah `.scl` via the [`puget_dsp`] quantizer).
+pub struct Setar {
+    /// The fingernail-plucked melody strings (round-robin pool).
+    strings: Vec<PluckString>,
+    /// The sympathetic bass doubling string — tuned and left to ring.
+    symp: PluckString,
+    symp_hz: f32,
+    /// Warm mulberry-wood body: low, mellow resonances.
+    body: [Reso; 3],
+    body_mix: f32,
+    next: usize,
+    /// Melody → sympathetic bass coupling depth (shared bridge).
+    couple: f32,
+    width: f32,
+}
+
+impl Setar {
+    /// Build a setar voice with default polyphony.
+    pub fn new(fs: f32) -> Self {
+        Self::with_voices(fs, 4)
+    }
+
+    /// Build with an explicit melody polyphony (overlapping strings).
+    pub fn with_voices(fs: f32, voices: usize) -> Self {
+        let voices = voices.max(1);
+        let mut strings = Vec::with_capacity(voices);
+        for i in 0..voices {
+            let mut s = PluckString::new(fs, 0x5E7Au32.wrapping_mul(i as u32 + 1) ^ 0x1D0B);
+            // Thin steel/brass strings, but voiced soft: a fingernail attack is
+            // darker and rounder than the tar's brass plectrum, so start with a
+            // notably darker loop filter than the tar (0.40) and a gentle,
+            // singing decay. Only a whisper of stiffness — the strings are thin.
+            s.damp = 0.58;
+            s.decay = 0.9955;
+            s.set_dispersion(0.32, 1900.0, 1);
+            strings.push(s);
+        }
+        // The sympathetic bass doubling: a heavier, darker, long-ringing string.
+        let mut symp = PluckString::new(fs, 0x5E7Au32.wrapping_mul(0xB1) ^ 0x77C5);
+        symp.damp = 0.62;
+        symp.decay = 0.9975;
+        let symp_hz = 130.81; // C3 — an octave below a C4 tonic, the bass halo
+        symp.base_hz = symp_hz;
+        symp.set_freq(symp_hz);
+        Setar {
+            strings,
+            symp,
+            symp_hz,
+            // Mulberry soundbox: warm and woody, distinctly lower and mellower
+            // than the tar's bright 320/880/2400 skin membrane.
+            body: [
+                Reso::new(200.0, 9.0, 0.8, fs),
+                Reso::new(520.0, 8.0, 0.45, fs),
+                Reso::new(1150.0, 6.0, 0.22, fs),
+            ],
+            body_mix: 0.15,
+            next: 0,
+            // A light sympathetic halo — enough to set the bass humming under a
+            // plucked note, gentle enough never to run away.
+            couple: 0.02,
+            width: 0.3,
+        }
+    }
+
+    /// Tune the sympathetic bass string (Hz). Kept tuned so it rings true even
+    /// before it is ever plucked directly.
+    pub fn set_sympathetic_hz(&mut self, hz: f32) {
+        self.symp_hz = hz.max(1.0);
+        self.symp.base_hz = self.symp_hz;
+        self.symp.set_freq(self.symp_hz);
+    }
+
+    /// Pluck a melody note (Hz — feed it already quantized). Allocates the next
+    /// string in the pool; its motion couples into the sympathetic bass.
+    pub fn pluck(&mut self, hz: f32, velocity: f32) {
+        let hz = hz.max(1.0);
+        let i = self.next;
+        self.next = (self.next + 1) % self.strings.len();
+        self.strings[i].pluck(hz, velocity);
+    }
+
+    /// Pluck the sympathetic bass string directly (at its tuned pitch) — a soft
+    /// open bass stroke.
+    pub fn pluck_sympathetic(&mut self, velocity: f32) {
+        let hz = self.symp_hz;
+        self.symp.pluck(hz, velocity);
+    }
+
+    /// Brightness of the melody strings: 0 = dark/velvety, 1 = present.
+    /// Deliberately darker overall than the tar — the fingernail is mellow.
+    pub fn set_brightness(&mut self, amount: f32) {
+        let a = amount.clamp(0.0, 1.0);
+        let damp = 0.70 - 0.40 * a;
+        for s in &mut self.strings {
+            s.damp = damp;
+        }
+        // The bass tracks a touch darker still.
+        self.symp.damp = (damp + 0.06).clamp(0.0, 0.995);
+    }
+
+    /// Sustain of the strings: 0 = short, 1 = long singing ring.
+    pub fn set_sustain(&mut self, amount: f32) {
+        let a = amount.clamp(0.0, 1.0);
+        let decay = 0.990 + 0.0075 * a;
+        for s in &mut self.strings {
+            s.decay = decay;
+        }
+        self.symp.decay = (decay + 0.0015).clamp(0.0, 0.99999);
+    }
+
+    /// Stereo spread of the string field (0 = mono, 1 = wide). A setar is small
+    /// and intimate, so the default spread is narrow.
+    pub fn set_width(&mut self, amount: f32) {
+        self.width = amount.clamp(0.0, 1.0);
+    }
+
+    /// Per-note humanization (0 = mechanical, 1 = loose). Pitch-neutral.
+    pub fn set_humanize(&mut self, amount: f32) {
+        for s in &mut self.strings {
+            s.set_humanize(amount);
+        }
+        self.symp.set_humanize(amount);
+    }
+
+    /// Whether any string is still ringing.
+    pub fn active(&self) -> bool {
+        self.symp.active() || self.strings.iter().any(|s| s.active())
+    }
+
+    /// One stereo sample. Melody strings are laid gently across a narrow field;
+    /// the sympathetic bass sits centred beneath, and the warm mulberry body
+    /// colours the sum.
+    #[inline]
+    pub fn process(&mut self) -> (f32, f32) {
+        let n = self.strings.len();
+        let mut mono = 0.0;
+        let mut l = 0.0;
+        let mut r = 0.0;
+        let mut melody_sum = 0.0;
+        for (i, s) in self.strings.iter_mut().enumerate() {
+            let x = s.tick();
+            melody_sum += x;
+            mono += x;
+            let pos = if n > 1 { i as f32 / (n - 1) as f32 - 0.5 } else { 0.0 };
+            let pan = pos * self.width;
+            l += x * (0.5 - pan);
+            r += x * (0.5 + pan);
+        }
+        // Shared-bridge coupling: the melody strings' motion drives the bass
+        // loop, so a plucked note sets the sympathetic string humming.
+        self.symp.inject(self.couple * melody_sum);
+        let bass = self.symp.tick();
+        mono += bass;
+        l += bass * 0.5;
+        r += bass * 0.5;
+        let mut b = 0.0;
+        for res in &mut self.body {
+            b += res.tick(mono);
+        }
+        let body = self.body_mix * b;
+        let g = 1.5 / mathf::sqrt(n as f32 + 1.0);
+        ((l + body) * g, (r + body) * g)
+    }
+}
+
+/// Strings per barbat course (a doubled course — two strings to a note).
+const BARBAT_STRINGS_PER_COURSE: usize = 2;
+/// A barbat course's two strings sit a few cents apart (the paired chorus).
+const BARBAT_DETUNE_PATTERN: [f32; BARBAT_STRINGS_PER_COURSE] = [-0.5, 0.5];
+
+/// One barbat course: a pair of nylon/gut strings plucked together by the
+/// *risha*, their slight detune giving the warm paired-course chorus.
+struct BarbatCourse {
+    strings: [PluckString; BARBAT_STRINGS_PER_COURSE],
+}
+impl BarbatCourse {
+    fn new(fs: f32, seed: u32) -> Self {
+        let strings = core::array::from_fn(|k| {
+            let mut s = PluckString::new(fs, seed ^ (0x4B17u32.wrapping_mul(k as u32 + 1)));
+            // Gut/nylon strings: mellow and dark, long and round, essentially no
+            // stiffness (nylon is far less stiff than steel — no metallic clank).
+            s.damp = 0.52;
+            s.decay = 0.9955;
+            strings_disp(&mut s);
+            s
+        });
+        BarbatCourse { strings }
+    }
+    fn active(&self) -> bool {
+        self.strings.iter().any(|s| s.active())
+    }
+}
+/// Very light stiffness for a nylon string (kept tiny — nylon barely disperses).
+#[inline]
+fn strings_disp(s: &mut PluckString) {
+    s.set_dispersion(0.2, 2200.0, 1);
+}
+
+/// The **barbat** (the Persian **oud**): a short-neck **fretless** lute with a
+/// large, deep wooden bowl and gut/nylon strings plucked with a *risha* (an
+/// eagle-feather quill). It is the warm, bass-heavy, round counterpart to the
+/// bright metal-strung lutes — where the basitar is an electric, clanky
+/// treble instrument, the barbat is all deep wood and mellow nylon. Its
+/// signature is the **fretless slide**: with no frets to stop the string the
+/// player glides between pitches, the sound *bending* from note to note.
+///
+/// A modular voice maps onto it as a **pool of doubled courses** over a big,
+/// **low** wooden body; [`pluck`](Barbat::pluck) sounds a note, while
+/// [`pluck_glide`](Barbat::pluck_glide) and [`set_bend`](Barbat::set_bend) drive
+/// the fretless portamento by riding the string's per-sample glide. Feed it
+/// already-quantized pitches (e.g. from a dastgah `.scl` via the [`puget_dsp`]
+/// quantizer).
+pub struct Barbat {
+    courses: Vec<BarbatCourse>,
+    /// Big, deep wooden bowl: low, warm resonances.
+    body: [Reso; 3],
+    body_mix: f32,
+    next: usize,
+    /// The course the risha last sounded (glide/bend follow this note).
+    active: usize,
+    detune_cents: f32,
+    /// Per-sample glide coefficient (how fast a slide chases its target).
+    glide: f32,
+    width: f32,
+}
+
+impl Barbat {
+    /// Build a barbat voice with default polyphony.
+    pub fn new(fs: f32) -> Self {
+        Self::with_courses(fs, 6)
+    }
+
+    /// Build with an explicit polyphony (overlapping courses).
+    pub fn with_courses(fs: f32, courses: usize) -> Self {
+        let courses_n = courses.max(1);
+        let mut courses = Vec::with_capacity(courses_n);
+        for i in 0..courses_n {
+            courses.push(BarbatCourse::new(fs, 0x6B17u32.wrapping_mul(i as u32 + 1)));
+        }
+        Barbat {
+            courses,
+            // Big deep bowl: low, warm resonances — the opposite of the basitar's
+            // amp presence and far lower than the tar's bright skin top.
+            body: [
+                Reso::new(110.0, 8.0, 0.9, fs),
+                Reso::new(240.0, 9.0, 0.6, fs),
+                Reso::new(520.0, 7.0, 0.3, fs),
+            ],
+            body_mix: 0.18,
+            next: 0,
+            active: 0,
+            detune_cents: 4.0,
+            // A musical portamento glide by default (~tens of ms).
+            glide: 0.0005,
+            width: 0.3,
+        }
+    }
+
+    /// Pluck a note (Hz — feed it already quantized). Allocates the next course
+    /// and plucks its pair of strings, detuned a few cents with a tiny sweep.
+    /// Resets any lingering bend so the note starts dead on pitch.
+    pub fn pluck(&mut self, hz: f32, velocity: f32) {
+        let hz = hz.max(1.0);
+        let i = self.next;
+        self.next = (self.next + 1) % self.courses.len();
+        self.active = i;
+        for (k, s) in self.courses[i].strings.iter_mut().enumerate() {
+            let cents = BARBAT_DETUNE_PATTERN[k] * self.detune_cents;
+            s.pluck(hz * mathf::exp2(cents / 1200.0), velocity);
+            // No fretless bend on a plain pluck.
+            s.bend_cents = 0.0;
+            s.bend_cur = 0.0;
+            // The risha crosses the two strings a hair apart.
+            s.set_onset((k as f32 * 0.0007 * s.fs) as u32);
+        }
+    }
+
+    /// **Fretless slide**: pluck a course at `from_hz` and glide it to `to_hz` —
+    /// the oud's signature portamento. Both strings of the course start at
+    /// `from_hz` (detuned around it) and slide toward `to_hz` at the current
+    /// glide rate. Feed already-quantized endpoints.
+    pub fn pluck_glide(&mut self, from_hz: f32, to_hz: f32, velocity: f32) {
+        let from_hz = from_hz.max(1.0);
+        let to_hz = to_hz.max(1.0);
+        let cents = 1200.0 * mathf::log2(to_hz / from_hz);
+        let i = self.next;
+        self.next = (self.next + 1) % self.courses.len();
+        self.active = i;
+        let glide = self.glide;
+        for (k, s) in self.courses[i].strings.iter_mut().enumerate() {
+            let det = BARBAT_DETUNE_PATTERN[k] * self.detune_cents;
+            s.pluck(from_hz * mathf::exp2(det / 1200.0), velocity);
+            // Slide the whole course by `cents`; the per-string detune rides along
+            // in the fixed base pitch, so the chorus is preserved through the bend.
+            s.bend_cur = 0.0;
+            s.bend_cents = cents;
+            s.glide = glide;
+            s.set_onset((k as f32 * 0.0007 * s.fs) as u32);
+        }
+    }
+
+    /// Bend the currently-sounding note toward `cents` (glides in) — the fretless
+    /// pitch push under the finger. Positive slides up, negative down.
+    pub fn set_bend(&mut self, cents: f32) {
+        if let Some(c) = self.courses.get_mut(self.active) {
+            for s in &mut c.strings {
+                s.bend_cents = cents;
+                s.glide = self.glide;
+            }
+        }
+    }
+
+    /// Glide rate of the fretless slide: 0 = very slow drift, 1 = near-instant.
+    pub fn set_glide(&mut self, amount: f32) {
+        let a = amount.clamp(0.0, 1.0);
+        // Map to a per-sample chase coefficient spanning slow portamento → fast.
+        self.glide = 0.0002 + 0.004 * a;
+    }
+
+    /// Detune between the two strings of a course, in cents (the paired chorus).
+    /// Applies to the next pluck.
+    pub fn set_chorus(&mut self, cents: f32) {
+        self.detune_cents = cents.max(0.0);
+    }
+
+    /// Brightness of the strings: 0 = dark/velvety nylon, 1 = a touch more
+    /// present. Deliberately dark and round — this is a warm, woody instrument.
+    pub fn set_brightness(&mut self, amount: f32) {
+        let a = amount.clamp(0.0, 1.0);
+        let damp = 0.68 - 0.34 * a;
+        for c in &mut self.courses {
+            for s in &mut c.strings {
+                s.damp = damp;
+            }
+        }
+    }
+
+    /// Sustain of the strings: 0 = short, 1 = long ringing.
+    pub fn set_sustain(&mut self, amount: f32) {
+        let a = amount.clamp(0.0, 1.0);
+        let decay = 0.988 + 0.0095 * a;
+        for c in &mut self.courses {
+            for s in &mut c.strings {
+                s.decay = decay;
+            }
+        }
+    }
+
+    /// Stereo spread of the course field (0 = mono, 1 = wide).
+    pub fn set_width(&mut self, amount: f32) {
+        self.width = amount.clamp(0.0, 1.0);
+    }
+
+    /// Per-note humanization (0 = mechanical, 1 = loose). Pitch-neutral.
+    pub fn set_humanize(&mut self, amount: f32) {
+        for c in &mut self.courses {
+            for s in &mut c.strings {
+                s.set_humanize(amount);
+            }
+        }
+    }
+
+    /// Whether any course is still ringing.
+    pub fn active(&self) -> bool {
+        self.courses.iter().any(|c| c.active())
+    }
+
+    /// One stereo sample. Courses are laid across the field; the deep wooden
+    /// bowl colours their sum.
+    #[inline]
+    pub fn process(&mut self) -> (f32, f32) {
+        let n = self.courses.len();
+        let mut mono = 0.0;
+        let mut l = 0.0;
+        let mut r = 0.0;
+        for (i, c) in self.courses.iter_mut().enumerate() {
+            let mut cx = 0.0;
+            for s in &mut c.strings {
+                cx += s.tick();
+            }
+            mono += cx;
+            let pos = if n > 1 { i as f32 / (n - 1) as f32 - 0.5 } else { 0.0 };
+            let pan = pos * self.width;
+            l += cx * (0.5 - pan);
+            r += cx * (0.5 + pan);
+        }
+        let mut b = 0.0;
+        for res in &mut self.body {
+            b += res.tick(mono);
+        }
+        let body = self.body_mix * b;
+        let g = 1.5 / mathf::sqrt((n * BARBAT_STRINGS_PER_COURSE) as f32);
+        ((l + body) * g, (r + body) * g)
+    }
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
@@ -1652,6 +2068,150 @@ mod tests {
         assert!(
             (cents - 700.0).abs() < 30.0,
             "interval off: {cents:.1} cents ({f_low:.1} -> {f_high:.1} Hz)"
+        );
+    }
+
+    #[test]
+    fn setar_plucks_ring_and_decay_in_tune() {
+        let fs = 48_000.0;
+        let mut s = Setar::new(fs);
+        s.set_brightness(0.5);
+        s.set_sustain(0.7);
+        s.set_sympathetic_hz(130.81);
+        for &hz in &[261.63f32, 293.66, 329.63, 392.0] {
+            s.pluck(hz, 0.8);
+            for _ in 0..6_000 {
+                let (l, r) = s.process();
+                assert!(l.is_finite() && r.is_finite(), "non-finite");
+            }
+        }
+        let mut peak = 0.0f32;
+        for _ in 0..4_000 {
+            let (l, r) = s.process();
+            peak = peak.max(l.abs()).max(r.abs());
+        }
+        assert!(peak > 0.01, "too quiet: {peak}");
+        for _ in 0..fs as usize * 6 {
+            s.process();
+        }
+        let mut tail = 0.0f32;
+        for _ in 0..4_800 {
+            let (l, r) = s.process();
+            tail = tail.max(l.abs()).max(r.abs());
+        }
+        assert!(tail < peak, "did not decay: tail {tail} vs peak {peak}");
+
+        // A single melody string lands in tune (humanize off for a clean read).
+        let mut s = Setar::with_voices(fs, 1);
+        s.set_sustain(1.0);
+        s.set_humanize(0.0);
+        s.pluck(220.0, 1.0);
+        let buf: Vec<f32> = (0..24_000).map(|_| s.process().0).collect();
+        let cents = partial_cents(&buf, fs, 220.0, 1);
+        assert!(cents.abs() < 2.0, "setar off by {cents:.2} cents");
+    }
+
+    #[test]
+    fn setar_bass_rings_sympathetically() {
+        // Plucking only the melody should set the tuned, un-plucked sympathetic
+        // bass string humming via the shared bridge.
+        let fs = 48_000.0;
+        let mut s = Setar::new(fs);
+        s.set_sustain(0.8);
+        s.set_sympathetic_hz(196.0);
+        // Only a melody note is struck (an octave above the bass).
+        s.pluck(392.0, 1.0);
+        for _ in 0..24_000 {
+            s.process();
+        }
+        let mut bass_energy = 0.0f32;
+        for _ in 0..8_000 {
+            s.process();
+            bass_energy += s.symp.delay.last_out().powi(2);
+        }
+        assert!(
+            bass_energy > 1e-6 && bass_energy.is_finite(),
+            "sympathetic bass did not ring: energy {bass_energy:e}"
+        );
+    }
+
+    #[test]
+    fn barbat_plucks_ring_and_decay_in_tune() {
+        let fs = 48_000.0;
+        let mut b = Barbat::new(fs);
+        b.set_brightness(0.4);
+        b.set_sustain(0.7);
+        for &hz in &[146.83f32, 196.0, 220.0, 293.66] {
+            b.pluck(hz, 0.85);
+            for _ in 0..6_000 {
+                let (l, r) = b.process();
+                assert!(l.is_finite() && r.is_finite(), "non-finite");
+            }
+        }
+        let mut peak = 0.0f32;
+        for _ in 0..4_000 {
+            let (l, r) = b.process();
+            peak = peak.max(l.abs()).max(r.abs());
+        }
+        assert!(peak > 0.01, "too quiet: {peak}");
+        for _ in 0..fs as usize * 6 {
+            b.process();
+        }
+        let mut tail = 0.0f32;
+        for _ in 0..4_800 {
+            let (l, r) = b.process();
+            tail = tail.max(l.abs()).max(r.abs());
+        }
+        assert!(tail < peak, "did not decay: tail {tail} vs peak {peak}");
+
+        // A single course lands in tune (humanize + chorus off for a clean read).
+        let mut b = Barbat::with_courses(fs, 1);
+        b.set_sustain(1.0);
+        b.set_chorus(0.0);
+        b.set_humanize(0.0);
+        b.pluck(220.0, 1.0);
+        let buf: Vec<f32> = (0..24_000).map(|_| b.process().0).collect();
+        let cents = partial_cents(&buf, fs, 220.0, 1);
+        assert!(cents.abs() < 2.0, "barbat off by {cents:.2} cents");
+    }
+
+    #[test]
+    fn barbat_fretless_glide_slides_pitch() {
+        // The oud's fretless portamento: a note plucked at `from` and glided to
+        // `to` should measurably rise in pitch across its ring.
+        let fs = 48_000.0;
+        let mut b = Barbat::with_courses(fs, 1);
+        b.set_sustain(1.0);
+        b.set_chorus(0.0);
+        b.set_humanize(0.0);
+        // Slide a full fifth up (196 -> 294) so the motion is unmistakable.
+        b.pluck_glide(196.0, 294.0, 1.0);
+        let buf: Vec<f32> = (0..24_000).map(|_| b.process().0).collect();
+
+        // Crude autocorrelation pitch over a short window centred at `at`.
+        fn pitch_at(buf: &[f32], fs: f32, at: usize) -> f32 {
+            let win = (fs / 40.0) as usize; // ~1200 samples
+            let (lo, hi) = ((fs / 400.0) as usize, (fs / 150.0) as usize);
+            let mut best = f32::MIN;
+            let mut lag0 = lo;
+            for lag in lo..hi {
+                let mut s = 0.0;
+                for i in 0..win {
+                    s += buf[at + i] * buf[at + i + lag];
+                }
+                if s > best {
+                    best = s;
+                    lag0 = lag;
+                }
+            }
+            fs / lag0 as f32
+        }
+
+        let early = pitch_at(&buf, fs, 2_500);
+        let late = pitch_at(&buf, fs, 20_000);
+        assert!(
+            late > early + 8.0,
+            "fretless glide did not slide up: early {early:.1} Hz, late {late:.1} Hz"
         );
     }
 
