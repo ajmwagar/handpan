@@ -1,2 +1,5 @@
 [handpan-plugin]
 name = "Puget Handpan"
+
+[puget-plugin]
+name = "Puget Studio"

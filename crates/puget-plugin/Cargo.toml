@@ -1,0 +1,21 @@
+[package]
+name = "puget-plugin"
+version = "0.1.0"
+edition = "2021"
+authors = ["Avery Wagar"]
+description = "Puget Studio — universal VST3/CLAP instrument exposing every Puget physical-modeling voice"
+license-file = "../../LICENSE"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+handpan-core = { path = "../handpan-core" }
+wind-core = { path = "../wind-core" }
+bowed-core = { path = "../bowed-core" }
+mallet-core = { path = "../mallet-core" }
+plucked-core = { path = "../plucked-core" }
+drum-core = { path = "../drum-core" }
+puget-dsp = { path = "../puget-dsp" }
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }
