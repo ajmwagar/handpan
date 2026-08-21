@@ -1,6 +1,6 @@
 //! # drum-core
 //!
-//! Membrane-drum physical modeling. Three voices share one circular-membrane
+//! Membrane-drum physical modeling. Four voices share one circular-membrane
 //! engine:
 //! - the **[`Dohol`]** — a **bass drum** of the Persian *dohol* / Turkish–Balkan
 //!   *davul* family: a big double-headed drum struck with a heavy beater (the
@@ -14,6 +14,14 @@
 //!   both setting the internal rings shimmering, plus a hand-`shake` that rattles
 //!   the jingles on their own. The frame head is the same modal membrane; the
 //!   jingles are a cluster of high, inharmonic, fast-decaying metallic rings.
+//! - the **[`Bodhran`]** — the Irish frame drum, a warm woody goatskin head
+//!   played with a double-ended wooden beater (the *tipper*): a deep round
+//!   centre stroke and a higher, sharper rim stroke — the two ends of the
+//!   tipper. Its signature is the **hand-pressure pitch control**:
+//!   [`Bodhran::set_pressure`] presses the free hand against the back of the
+//!   skin (0 = relaxed/low .. 1 = pressed hard/high), a shared frequency
+//!   multiplier that glides in smoothly and bends even a currently-ringing
+//!   stroke up a good few semitones — the classic bodhrán "wow".
 //!
 //! A real drumhead is a **2D circular membrane**, so its partials are the Bessel
 //! modes — *inharmonic* ratios (1 : 1.59 : 2.14 : 2.30 : …), nothing like a
@@ -735,6 +743,194 @@ impl Daf {
     }
 }
 
+/// The largest hand-pressure pitch bend: at full [`Bodhran::set_pressure`] the
+/// head is stretched enough to raise every mode by this frequency factor.
+/// `2^(6/12)` is a clean tritone — a "good few semitones", the range a real
+/// bodhrán player works under the free hand.
+const BODHRAN_PRESS_MAX: f32 = 1.4142_136; // +6 semitones
+
+/// The **bodhrán**: the Irish frame drum. A warm, woody goatskin head on the
+/// same 2D circular-membrane modal bank as the [`Dohol`], [`Tombak`] and
+/// [`Daf`], played with a double-ended wooden beater — the *tipper*:
+/// - a **centre** stroke ([`Bodhran::low`]) — deep, round, open;
+/// - a **rim/edge** stroke ([`Bodhran::high`]) — higher, sharper, more attack.
+///
+/// Struck with a wooden stick it carries only a slight tension pitch-drop (the
+/// head barely stretches from the hit itself). Its signature is the
+/// **hand-pressure pitch control**: the free hand presses the *back* of the
+/// skin, raising its tension and so its pitch. [`Bodhran::set_pressure`] scales
+/// every mode's frequency by a shared multiplier (0 = relaxed/low pitch .. 1 =
+/// pressed hard, up to [`BODHRAN_PRESS_MAX`]). Like the tension `glide` it is
+/// applied per-sample in [`Bodhran::process`] and glides smoothly toward its
+/// target (no zipper), so it bends notes struck after it *and* bends a
+/// currently-ringing stroke in real time — the expressive bodhrán "wow".
+pub struct Bodhran {
+    fs: f32,
+    fund: f32,
+    modes: [ModeState; MEMBRANE.len()],
+    // Tension pitch-glide from the strike itself (small — a stick, not a hand).
+    glide: f32,
+    glide_coef: f32,
+    pitch_drop: f32,
+    // Hand-pressure pitch bend: a shared frequency multiplier gliding toward
+    // its target so a held, ringing stroke bends in real time.
+    press_cur: f32,
+    press_target: f32,
+    press_coef: f32,
+    rng: Rng,
+    // Wooden tipper transient (a short filtered-noise tick).
+    click_rem: u32,
+    click_amp: f32,
+    click_lp: f32,
+    click_coef: f32,
+    t60: f32,
+    out_lp: f32,
+    out_pole: f32,
+}
+
+impl Bodhran {
+    pub fn new(fs: f32) -> Self {
+        Bodhran {
+            fs,
+            // A bodhrán sits warm and low-mid; ~85 Hz is a natural open tone.
+            fund: 85.0,
+            modes: [ModeState::default(); MEMBRANE.len()],
+            glide: 1.0,
+            // A wooden tipper barely stretches the head — a small, quick drop.
+            glide_coef: 1.0 - mathf::exp(-1.0 / (0.030 * fs)),
+            pitch_drop: 0.05,
+            press_cur: 1.0,
+            press_target: 1.0,
+            // The hand-pressure bend glides with a ~50 ms time constant: fast
+            // enough to feel played, slow enough to sing the "wow", never zipper.
+            press_coef: 1.0 - mathf::exp(-1.0 / (0.050 * fs)),
+            rng: Rng(0xB0D_11A11),
+            click_rem: 0,
+            click_amp: 0.0,
+            click_lp: 0.0,
+            click_coef: 0.0,
+            t60: 0.40,
+            out_lp: 0.0,
+            // Warm and woody — little top end (~5 kHz).
+            out_pole: mathf::exp(-core::f32::consts::TAU * 5000.0 / fs),
+        }
+    }
+
+    /// Tune the drum — the fundamental (0,1) mode pitch (Hz). A bodhrán lives
+    /// warm and low; ~70–110 Hz is typical.
+    pub fn set_tune(&mut self, hz: f32) {
+        self.fund = hz.clamp(40.0, 300.0);
+    }
+
+    /// Base ring length in seconds (the fundamental's T60; higher modes scale
+    /// down from it). Bodhráns give a moderate, open ring.
+    pub fn set_decay(&mut self, seconds: f32) {
+        self.t60 = seconds.clamp(0.05, 4.0);
+    }
+
+    /// **Hand pressure** on the back of the head: `amount` 0 = relaxed skin
+    /// (lowest pitch) .. 1 = hand pressed hard (highest pitch, up to
+    /// [`BODHRAN_PRESS_MAX`]). Sets the target of a smooth glide, so it raises
+    /// the pitch of notes struck afterwards *and* bends a currently-ringing
+    /// stroke up in real time — the classic bodhrán "wow". No zipper: the bend
+    /// eases toward the target over ~50 ms.
+    pub fn set_pressure(&mut self, amount: f32) {
+        let a = amount.clamp(0.0, 1.0);
+        self.press_target = 1.0 + a * (BODHRAN_PRESS_MAX - 1.0);
+    }
+
+    /// Internal: strike the head with the tipper. `pos` 0 = centre..1 = rim;
+    /// `slap`/`bright` set the wooden-tick level and cutoff.
+    fn beat_at(&mut self, velocity: f32, position: f32, slap: f32, bright: f32) {
+        let vel = velocity.clamp(0.0, 1.0);
+        let pos = position.clamp(0.0, 1.0);
+        // Only a slight tension drop from the stick; the hand does the bending.
+        self.glide = 1.0 + self.pitch_drop * (0.5 + 0.5 * vel) * (1.0 - 0.5 * pos);
+        for (st, md) in self.modes.iter_mut().zip(MEMBRANE.iter()) {
+            let f = self.fund * md.ratio;
+            if f >= self.fs * 0.48 {
+                st.amp = 0.0;
+                continue;
+            }
+            let m = md.m as f32;
+            let pos_w = if md.m == 0 {
+                1.0 - 0.55 * pos
+            } else {
+                (0.2 + pos) * (1.0 + 0.15 * m * pos)
+            };
+            st.inc = core::f32::consts::TAU * f / self.fs;
+            st.phase = (self.rng.next_f() + 1.0) * 0.5 * core::f32::consts::TAU;
+            st.amp = vel * md.gain * pos_w;
+            let t60 = (self.t60 * md.decay_rel).max(0.02);
+            st.dec = mathf::exp(-6.9078 / (t60 * self.fs));
+        }
+        self.click_rem = (0.006 * self.fs) as u32;
+        self.click_amp = vel * slap;
+        self.click_coef = 1.0 - mathf::exp(-core::f32::consts::TAU * bright / self.fs);
+    }
+
+    /// Strike the head with the tipper. `velocity` 0..1; `position` 0 = dead
+    /// centre (deep, round) .. 1 = at the rim/edge (higher, sharper). The two
+    /// ends of the double-ended beater are just two strike positions.
+    pub fn beat(&mut self, velocity: f32, position: f32) {
+        // A woodier tick toward the rim (harder, brighter contact).
+        let pos = position.clamp(0.0, 1.0);
+        let slap = 0.18 + 0.35 * pos;
+        let bright = 1800.0 + 4200.0 * pos;
+        self.beat_at(velocity, pos, slap, bright);
+    }
+
+    /// **Low** tipper end: a deep, round stroke near the centre.
+    pub fn low(&mut self, velocity: f32) {
+        self.beat_at(velocity, 0.14, 0.20, 1800.0);
+    }
+
+    /// **High** tipper end: a higher, sharper stroke out toward the rim/edge.
+    pub fn high(&mut self, velocity: f32) {
+        self.beat_at(velocity, 0.85, 0.50, 5200.0);
+    }
+
+    /// Whether the drum is still sounding.
+    pub fn active(&self) -> bool {
+        self.click_rem > 0 || self.modes.iter().any(|m| m.amp > 1e-4)
+    }
+
+    /// One stereo sample (a single drum → centred/mono).
+    #[inline]
+    pub fn process(&mut self) -> (f32, f32) {
+        // Relax the strike tension glide toward 1.0.
+        self.glide += (1.0 - self.glide) * self.glide_coef;
+        // Ease the hand-pressure bend toward its target (no zipper).
+        self.press_cur += (self.press_target - self.press_cur) * self.press_coef;
+        // The two combine into one shared per-sample frequency scale.
+        let fscale = self.glide * self.press_cur;
+
+        let mut s = 0.0;
+        for st in &mut self.modes {
+            if st.amp <= 1e-5 {
+                continue;
+            }
+            s += st.amp * mathf::sin(st.phase);
+            st.phase += st.inc * fscale;
+            if st.phase >= core::f32::consts::TAU {
+                st.phase -= core::f32::consts::TAU;
+            }
+            st.amp *= st.dec;
+        }
+
+        if self.click_rem > 0 {
+            self.click_rem -= 1;
+            let n = self.rng.next_f();
+            self.click_lp += self.click_coef * (n - self.click_lp);
+            s += self.click_amp * self.click_lp;
+        }
+
+        self.out_lp += (1.0 - self.out_pole) * (s - self.out_lp);
+        let out = self.out_lp * 1.15;
+        (out, out)
+    }
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
@@ -990,5 +1186,154 @@ mod tests {
             peak_dry = peak_dry.max(q.process().0.abs());
         }
         assert!(peak_dry < peak, "muted shake {peak_dry:.4} not quieter than jingled {peak:.4}");
+    }
+
+    // Estimate the fundamental (Hz) of a buffer by autocorrelation in a band.
+    fn pitch_hz(buf: &[f32], fs: f32, lo_hz: f32, hi_hz: f32) -> f32 {
+        let (lo, hi) = ((fs / hi_hz) as usize, (fs / lo_hz) as usize);
+        let mut best = f32::MIN;
+        let mut lag0 = lo;
+        for lag in lo..hi {
+            let mut acc = 0.0;
+            for i in 0..buf.len() - lag {
+                acc += buf[i] * buf[i + lag];
+            }
+            if acc > best {
+                best = acc;
+                lag0 = lag;
+            }
+        }
+        fs / lag0 as f32
+    }
+
+    #[test]
+    fn bodhran_strokes_sound_and_decay() {
+        let fs = 48_000.0;
+        let mut b = Bodhran::new(fs);
+        b.set_tune(85.0);
+        b.set_decay(0.4);
+        for stroke in 0u8..3 {
+            match stroke {
+                0 => b.low(0.9),
+                1 => b.high(0.9),
+                _ => b.beat(0.9, 0.5),
+            }
+            let mut peak = 0.0f32;
+            for _ in 0..3_000 {
+                let (l, r) = b.process();
+                assert!(l.is_finite() && r.is_finite(), "non-finite");
+                peak = peak.max(l.abs());
+            }
+            assert!(peak > 0.01, "stroke {stroke} too quiet: {peak}");
+        }
+        // Ring out; a struck drum dies away.
+        let mut peak = 0.0f32;
+        b.low(1.0);
+        for i in 0..fs as usize * 2 {
+            let x = b.process().0.abs();
+            if i < 3_000 {
+                peak = peak.max(x);
+            }
+        }
+        let mut tail = 0.0f32;
+        for _ in 0..4_800 {
+            tail = tail.max(b.process().0.abs());
+        }
+        assert!(tail < peak, "did not decay: tail {tail} vs peak {peak}");
+        assert!(!b.active(), "bodhrán should be silent after ringing out");
+    }
+
+    #[test]
+    fn bodhran_rim_is_brighter_than_centre() {
+        // The rim/edge (high) end should carry more HF energy than the round
+        // centre (low) end.
+        fn high_ratio(rim: bool) -> f32 {
+            let fs = 48_000.0;
+            let mut b = Bodhran::new(fs);
+            b.set_tune(85.0);
+            b.set_decay(0.4);
+            if rim {
+                b.high(0.9);
+            } else {
+                b.low(0.9);
+            }
+            let mut prev = 0.0;
+            let (mut hf, mut tot) = (0.0f32, 1e-9f32);
+            for _ in 0..8_000 {
+                let x = b.process().0;
+                let h = x - prev;
+                prev = x;
+                hf += h * h;
+                tot += x * x;
+            }
+            hf / tot
+        }
+        let centre = high_ratio(false);
+        let rim = high_ratio(true);
+        assert!(rim > centre, "rim {rim:.4} not brighter than centre {centre:.4}");
+    }
+
+    #[test]
+    fn bodhran_pressure_raises_pitch_of_struck_note() {
+        // Strike relaxed, measure the pitch; strike again with the hand pressed
+        // hard, and the pitch should sit measurably higher.
+        fn struck_pitch(pressure: f32) -> f32 {
+            let fs = 48_000.0;
+            let mut b = Bodhran::new(fs);
+            b.set_tune(85.0);
+            b.set_decay(1.2);
+            b.set_pressure(pressure);
+            // Let the pressure glide settle before striking.
+            for _ in 0..8_000 {
+                b.process();
+            }
+            b.low(0.9);
+            // Skip the attack/tension glide, then capture a window.
+            for _ in 0..3_000 {
+                b.process();
+            }
+            let buf: Vec<f32> = (0..24_000).map(|_| b.process().0).collect();
+            pitch_hz(&buf, fs, 50.0, 220.0)
+        }
+        let relaxed = struck_pitch(0.0);
+        let pressed = struck_pitch(1.0);
+        let cents = 1200.0 * (pressed / relaxed).log2();
+        assert!(
+            cents > 200.0,
+            "pressure did not raise pitch enough: relaxed {relaxed:.1} Hz, pressed {pressed:.1} Hz ({cents:.0} cents)"
+        );
+    }
+
+    #[test]
+    fn bodhran_pressure_bends_a_ringing_note() {
+        // The classic "wow": raise the pressure while a note is already ringing
+        // and its pitch should glide up in real time.
+        let fs = 48_000.0;
+        let mut b = Bodhran::new(fs);
+        b.set_tune(85.0);
+        b.set_decay(2.5);
+        b.set_pressure(0.0);
+        for _ in 0..4_000 {
+            b.process();
+        }
+        b.low(1.0);
+        // Let the strike settle, then measure the ringing pitch.
+        for _ in 0..3_000 {
+            b.process();
+        }
+        let before: Vec<f32> = (0..16_000).map(|_| b.process().0).collect();
+        let f_before = pitch_hz(&before, fs, 50.0, 260.0);
+        // Now press the hand hard on the SAME ringing note and let it bend.
+        b.set_pressure(1.0);
+        for _ in 0..6_000 {
+            b.process();
+        }
+        let after: Vec<f32> = (0..16_000).map(|_| b.process().0).collect();
+        let f_after = pitch_hz(&after, fs, 50.0, 320.0);
+        let cents = 1200.0 * (f_after / f_before).log2();
+        assert!(
+            cents > 200.0,
+            "ringing note did not bend up: {f_before:.1} Hz -> {f_after:.1} Hz ({cents:.0} cents)"
+        );
     }
 }
