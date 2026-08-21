@@ -1,6 +1,6 @@
 //! # drum-core
 //!
-//! Membrane-drum physical modeling. Two voices share one circular-membrane
+//! Membrane-drum physical modeling. Three voices share one circular-membrane
 //! engine:
 //! - the **[`Dohol`]** — a **bass drum** of the Persian *dohol* / Turkish–Balkan
 //!   *davul* family: a big double-headed drum struck with a heavy beater (the
@@ -9,6 +9,11 @@
 //! - the **[`Tombak`]** (*zarb*) — the Persian goblet hand drum, the lead voice
 //!   of the classical percussion: a pitched, resonant *tom* at the centre, a
 //!   dry bright *bak* at the rim, and light *finger* taps for the rapid rolls.
+//! - the **[`Daf`]** — the large Persian frame drum ringed on the inside with
+//!   loose metal jingles: a deep open-frame *dum* at the centre and a rim *tak*,
+//!   both setting the internal rings shimmering, plus a hand-`shake` that rattles
+//!   the jingles on their own. The frame head is the same modal membrane; the
+//!   jingles are a cluster of high, inharmonic, fast-decaying metallic rings.
 //!
 //! A real drumhead is a **2D circular membrane**, so its partials are the Bessel
 //! modes — *inharmonic* ratios (1 : 1.59 : 2.14 : 2.30 : …), nothing like a
@@ -453,6 +458,283 @@ impl Tombak {
     }
 }
 
+/// The internal metal jingles of the [`Daf`]: a small fixed cluster of high,
+/// **inharmonic**, fast-decaying ringing partials. Each entry is a frequency
+/// ratio to [`JINGLE_BASE`], an excitation gain, and its ring time (T60, s).
+/// The ratios are deliberately non-integer — loose rings have no pitch, only a
+/// bright metallic shimmer.
+const JINGLE: &[(f32, f32, f32)] = &[
+    // ratio  gain  t60
+    (1.000, 1.00, 0.30),
+    (1.347, 0.82, 0.25),
+    (1.712, 0.66, 0.21),
+    (2.153, 0.52, 0.17),
+    (2.629, 0.40, 0.14),
+    (3.094, 0.30, 0.11),
+];
+/// Base frequency of the jingle cluster (Hz) — the lowest ring sits here and the
+/// [`JINGLE`] ratios fan the rest up into the bright metallic band.
+const JINGLE_BASE: f32 = 3300.0;
+
+/// The **daf**: the large Persian frame drum, its inner rim strung with loose
+/// metal rings. Two layers sound together:
+/// - a **frame-drum membrane** — the same 2D circular-membrane modal bank as the
+///   [`Dohol`] and [`Tombak`], voiced big, low and open with only a slight
+///   tension pitch-drop (a hand, not a beater): a deep centre **dum** and a
+///   brighter rim **tak**;
+/// - a **jingle layer** — a fixed cluster of high, inharmonic, fast-decaying
+///   metallic rings ([`JINGLE`]) plus a short band-passed noise chiff. Every
+///   strike sets them shimmering, scaled by velocity and by position (a rim
+///   *tak* rattles them far more than a centre *dum*), and [`Daf::shake`] rattles
+///   them on their own. [`Daf::set_jingle`] dials the layer from a dry frame drum
+///   (0) up to full jingles (1).
+///
+/// The membrane path is rolled off dark like the other drums; the jingle path is
+/// summed on top **after** that roll-off, so the rings keep their bright top end.
+pub struct Daf {
+    fs: f32,
+    fund: f32,
+    modes: [ModeState; MEMBRANE.len()],
+    glide: f32,
+    glide_coef: f32,
+    pitch_drop: f32,
+    rng: Rng,
+    // Membrane strike/rim-slap noise transient.
+    noise_rem: u32,
+    noise_amp: f32,
+    noise_lp: f32,
+    noise_coef: f32,
+    t60: f32,
+    // Jingle layer: a cluster of high inharmonic decaying rings...
+    jingle: [ModeState; JINGLE.len()],
+    // ...a short metallic noise chiff on each excitation, coloured by a high
+    // band-pass, giving the rings their shimmering "tsss" edge...
+    jn_rem: u32,
+    jn_amp: f32,
+    jingle_bp: Reso,
+    // ...and a sustained shake rattle that keeps re-exciting the rings.
+    shake_rem: u32,
+    shake_intensity: f32,
+    shake_tick: u32,
+    jingle_mix: f32,
+    // Membrane-path output roll-off.
+    out_lp: f32,
+    out_pole: f32,
+}
+
+impl Daf {
+    pub fn new(fs: f32) -> Self {
+        let mut d = Daf {
+            fs,
+            fund: 82.0,
+            modes: [ModeState::default(); MEMBRANE.len()],
+            glide: 1.0,
+            // A frame drum stretches only a little under the hand — a small,
+            // quick pitch-drop (~30 ms).
+            glide_coef: 1.0 - mathf::exp(-1.0 / (0.030 * fs)),
+            pitch_drop: 0.05,
+            rng: Rng(0x0DAF_1234),
+            noise_rem: 0,
+            noise_amp: 0.0,
+            noise_lp: 0.0,
+            noise_coef: 0.0,
+            t60: 0.55,
+            jingle: [ModeState::default(); JINGLE.len()],
+            jn_rem: 0,
+            jn_amp: 0.0,
+            // Bright metallic band-pass colouring the jingle noise.
+            jingle_bp: Reso::new(6800.0, 2.5, 1.0, fs),
+            shake_rem: 0,
+            shake_intensity: 0.0,
+            shake_tick: 0,
+            jingle_mix: 0.7,
+            out_lp: 0.0,
+            // Membrane rolled off ~4.5 kHz (the frame head has little top of its
+            // own — the shimmer comes from the jingles, added after this).
+            out_pole: mathf::exp(-core::f32::consts::TAU * 4500.0 / fs),
+        };
+        for m in &mut d.jingle {
+            *m = ModeState::default();
+        }
+        d
+    }
+
+    /// Tune the frame drum — the *dum*'s fundamental (Hz). A big daf sits low and
+    /// open; ~70–95 Hz is typical.
+    pub fn set_tune(&mut self, hz: f32) {
+        self.fund = hz.clamp(40.0, 300.0);
+    }
+
+    /// Base ring length of the head in seconds (the fundamental's T60; higher
+    /// modes scale down from it). This is the *membrane* decay — the jingles keep
+    /// their own fixed, fast metallic ring.
+    pub fn set_decay(&mut self, seconds: f32) {
+        self.t60 = seconds.clamp(0.05, 6.0);
+    }
+
+    /// How much jingle to mix in: 0 = a dry frame drum (jingles silent), 1 = full
+    /// shimmering rings on top of every stroke and shake.
+    pub fn set_jingle(&mut self, amount: f32) {
+        self.jingle_mix = amount.clamp(0.0, 1.0);
+    }
+
+    /// Internal: strike the frame head. `pos` 0 = centre..1 = rim; `decay_scale`
+    /// shortens the ring; `slap`/`bright` set the strike-noise level and cutoff;
+    /// `drop` scales the (small) tension pitch-drop.
+    fn strike_head(&mut self, velocity: f32, pos: f32, decay_scale: f32, slap: f32, bright: f32, drop: f32) {
+        let vel = velocity.clamp(0.0, 1.0);
+        let pos = pos.clamp(0.0, 1.0);
+        self.glide = 1.0 + self.pitch_drop * drop * (0.5 + 0.5 * vel) * (1.0 - 0.5 * pos);
+        for (st, md) in self.modes.iter_mut().zip(MEMBRANE.iter()) {
+            let f = self.fund * md.ratio;
+            if f >= self.fs * 0.48 {
+                st.amp = 0.0;
+                continue;
+            }
+            let m = md.m as f32;
+            let pos_w = if md.m == 0 {
+                1.0 - 0.55 * pos
+            } else {
+                (0.2 + pos) * (1.0 + 0.15 * m * pos)
+            };
+            st.inc = core::f32::consts::TAU * f / self.fs;
+            st.phase = (self.rng.next_f() + 1.0) * 0.5 * core::f32::consts::TAU;
+            st.amp = vel * md.gain * pos_w;
+            let t60 = (self.t60 * md.decay_rel * decay_scale).max(0.02);
+            st.dec = mathf::exp(-6.9078 / (t60 * self.fs));
+        }
+        self.noise_rem = (0.008 * self.fs) as u32;
+        self.noise_amp = vel * slap;
+        self.noise_coef = 1.0 - mathf::exp(-core::f32::consts::TAU * bright / self.fs);
+    }
+
+    /// Internal: set the jingle cluster ringing with the given excitation
+    /// `energy`. When `chiff` is true it also fires the short metallic
+    /// noise burst; the shake bed re-excites the rings with `chiff = false`.
+    fn excite_jingles(&mut self, energy: f32, chiff: bool) {
+        let energy = energy.max(0.0);
+        for (st, &(ratio, gain, t60)) in self.jingle.iter_mut().zip(JINGLE.iter()) {
+            let f = JINGLE_BASE * ratio;
+            if f >= self.fs * 0.48 {
+                st.amp = 0.0;
+                continue;
+            }
+            // Loose rings rattle unevenly — jitter each ring's level and phase.
+            let jit = 0.7 + 0.3 * (self.rng.next_f() * 0.5 + 0.5);
+            st.inc = core::f32::consts::TAU * f / self.fs;
+            st.phase = (self.rng.next_f() + 1.0) * 0.5 * core::f32::consts::TAU;
+            // Additive so an overlapping strike/shake stacks, capped to stay tame.
+            st.amp = (st.amp + energy * gain * jit).min(1.5);
+            st.dec = mathf::exp(-6.9078 / (t60 * self.fs));
+        }
+        if chiff {
+            self.jn_rem = (0.012 * self.fs) as u32;
+            self.jn_amp = energy;
+        }
+    }
+
+    /// **Dum**: a deep open hit near the centre — the frame drum's full low tone.
+    /// The centre barely disturbs the rings, so only a little jingle shimmer.
+    pub fn dum(&mut self, velocity: f32) {
+        self.strike_head(velocity, 0.14, 1.0, 0.20, 1600.0, 1.0);
+        let vel = velocity.clamp(0.0, 1.0);
+        self.excite_jingles(vel * 0.28, true);
+    }
+
+    /// **Tak**: a crisp fingers-at-the-rim stroke — dry and bright, and it sets
+    /// the metal rings rattling far more than a centre dum.
+    pub fn tak(&mut self, velocity: f32) {
+        self.strike_head(velocity, 0.92, 0.42, 0.9, 6500.0, 0.3);
+        let vel = velocity.clamp(0.0, 1.0);
+        self.excite_jingles(vel * 1.0, true);
+    }
+
+    /// **Shake**: rattle the jingles on their own (no head strike) — the daf held
+    /// up and shaken. `intensity` 0..1 sets how hard and how long the rings rattle.
+    pub fn shake(&mut self, intensity: f32) {
+        let i = intensity.clamp(0.0, 1.0);
+        self.excite_jingles(i * 0.7, true);
+        self.shake_intensity = i;
+        self.shake_rem = ((0.12 + 0.55 * i) * self.fs) as u32;
+        self.shake_tick = 0;
+    }
+
+    /// Whether the drum (head or jingles) is still sounding.
+    pub fn active(&self) -> bool {
+        self.noise_rem > 0
+            || self.jn_rem > 0
+            || self.shake_rem > 0
+            || self.modes.iter().any(|m| m.amp > 1e-4)
+            || self.jingle.iter().any(|m| m.amp > 1e-4)
+    }
+
+    /// One stereo sample (a single drum → centred/mono).
+    #[inline]
+    pub fn process(&mut self) -> (f32, f32) {
+        // --- Frame-drum membrane (rolled off dark) ---
+        self.glide += (1.0 - self.glide) * self.glide_coef;
+        let mut s = 0.0;
+        for st in &mut self.modes {
+            if st.amp <= 1e-5 {
+                continue;
+            }
+            s += st.amp * mathf::sin(st.phase);
+            st.phase += st.inc * self.glide;
+            if st.phase >= core::f32::consts::TAU {
+                st.phase -= core::f32::consts::TAU;
+            }
+            st.amp *= st.dec;
+        }
+        if self.noise_rem > 0 {
+            self.noise_rem -= 1;
+            let n = self.rng.next_f();
+            self.noise_lp += self.noise_coef * (n - self.noise_lp);
+            s += self.noise_amp * self.noise_lp;
+        }
+        self.out_lp += (1.0 - self.out_pole) * (s - self.out_lp);
+        let membrane = self.out_lp;
+
+        // --- Jingle layer (kept bright, summed on top) ---
+        let mut j = 0.0;
+        for st in &mut self.jingle {
+            if st.amp <= 1e-5 {
+                continue;
+            }
+            j += st.amp * mathf::sin(st.phase);
+            st.phase += st.inc;
+            if st.phase >= core::f32::consts::TAU {
+                st.phase -= core::f32::consts::TAU;
+            }
+            st.amp *= st.dec;
+        }
+        // Metallic noise chiff + sustained shake rattle, both coloured by the
+        // bright band-pass so they read as ringing metal, not white noise.
+        let mut chiff = 0.0;
+        if self.jn_rem > 0 {
+            self.jn_rem -= 1;
+            chiff += self.rng.next_f() * self.jn_amp;
+        }
+        if self.shake_rem > 0 {
+            self.shake_rem -= 1;
+            chiff += self.rng.next_f() * self.shake_intensity * 0.5;
+            // Periodically re-excite the rings so a shake evolves and rattles
+            // rather than ringing one clean chord.
+            if self.shake_tick == 0 {
+                let e = self.shake_intensity * (0.25 + 0.35 * (self.rng.next_f() * 0.5 + 0.5));
+                self.excite_jingles(e, false);
+                let rate = 18.0 + 22.0 * self.shake_intensity; // rattles/sec
+                self.shake_tick = (self.fs / rate) as u32;
+            } else {
+                self.shake_tick -= 1;
+            }
+        }
+        j += self.jingle_bp.tick(chiff);
+
+        let out = membrane + self.jingle_mix * j;
+        (out, out)
+    }
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
@@ -619,5 +901,94 @@ mod tests {
         let (bak_hf, bak_sustain) = measure(true);
         assert!(bak_hf > tom_hf, "bak {bak_hf:.4} not brighter than tom {tom_hf:.4}");
         assert!(bak_sustain < tom_sustain, "bak did not decay faster: {bak_sustain:.4} vs {tom_sustain:.4}");
+    }
+
+    #[test]
+    fn daf_strokes_sound_and_decay() {
+        let fs = 48_000.0;
+        let mut d = Daf::new(fs);
+        d.set_tune(82.0);
+        d.set_decay(0.5);
+        for stroke in 0u8..2 {
+            if stroke == 0 {
+                d.dum(0.9);
+            } else {
+                d.tak(0.9);
+            }
+            let mut peak = 0.0f32;
+            for _ in 0..3_000 {
+                let (l, r) = d.process();
+                assert!(l.is_finite() && r.is_finite(), "non-finite");
+                peak = peak.max(l.abs());
+            }
+            assert!(peak > 0.01, "stroke {stroke} too quiet: {peak}");
+        }
+        // Ring out; a struck drum dies away.
+        let mut peak = 0.0f32;
+        d.dum(1.0);
+        for i in 0..fs as usize * 2 {
+            let x = d.process().0.abs();
+            if i < 3_000 {
+                peak = peak.max(x);
+            }
+        }
+        let mut tail = 0.0f32;
+        for _ in 0..4_800 {
+            tail = tail.max(d.process().0.abs());
+        }
+        assert!(tail < peak, "did not decay: tail {tail} vs peak {peak}");
+        assert!(!d.active(), "daf should be silent after ringing out");
+    }
+
+    #[test]
+    fn daf_jingles_add_high_frequency_energy() {
+        // A struck daf with the jingles on should carry measurably more
+        // high-frequency energy than the same stroke with the jingles off.
+        fn high_ratio(jingle: f32) -> f32 {
+            let fs = 48_000.0;
+            let mut d = Daf::new(fs);
+            d.set_tune(82.0);
+            d.set_decay(0.5);
+            d.set_jingle(jingle);
+            d.tak(0.9);
+            let mut prev = 0.0;
+            let (mut hf, mut tot) = (0.0f32, 1e-9f32);
+            for _ in 0..12_000 {
+                let x = d.process().0;
+                let h = x - prev;
+                prev = x;
+                hf += h * h;
+                tot += x * x;
+            }
+            hf / tot
+        }
+        let dry = high_ratio(0.0);
+        let wet = high_ratio(1.0);
+        assert!(wet > dry, "jingles did not brighten: wet {wet:.4} vs dry {dry:.4}");
+    }
+
+    #[test]
+    fn daf_shake_produces_sound() {
+        let fs = 48_000.0;
+        let mut d = Daf::new(fs);
+        d.set_jingle(1.0);
+        d.shake(0.9);
+        let mut peak = 0.0f32;
+        for _ in 0..8_000 {
+            let (l, r) = d.process();
+            assert!(l.is_finite() && r.is_finite(), "non-finite");
+            peak = peak.max(l.abs());
+        }
+        assert!(peak > 0.01, "shake too quiet: {peak}");
+        // A shake with the jingles muted should be (near) silent — the shake only
+        // drives the jingle layer, nothing reaches the membrane path.
+        let mut q = Daf::new(fs);
+        q.set_jingle(0.0);
+        q.shake(0.9);
+        let mut peak_dry = 0.0f32;
+        for _ in 0..8_000 {
+            peak_dry = peak_dry.max(q.process().0.abs());
+        }
+        assert!(peak_dry < peak, "muted shake {peak_dry:.4} not quieter than jingled {peak:.4}");
     }
 }

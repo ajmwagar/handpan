@@ -28,3 +28,7 @@ required-features = ["std"]
 [[example]]
 name = "render_tombak"
 required-features = ["std"]
+
+[[example]]
+name = "render_daf"
+required-features = ["std"]
