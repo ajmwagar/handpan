@@ -638,8 +638,9 @@ impl Wind {
             drone_freqs: [0.0; 3],
             drone_phase: [0.0, 0.33, 0.66],
             drone_lp: [0.0; 3],
-            // ~2 kHz one-pole: a warm, reedy drone bed (buzzy but not fizzy).
-            drone_lp_c: 1.0 - mathf::exp(-core::f32::consts::TAU * 2000.0 / fs),
+            // ~1.2 kHz one-pole: softens the top of the reed-pipe drone so the
+            // bed is warm and hollow, never harsh.
+            drone_lp_c: 1.0 - mathf::exp(-core::f32::consts::TAU * 1200.0 / fs),
             // Tenor loudest, the lower octaves progressively softer.
             drone_gain: [0.30, 0.24, 0.18],
             out_gain,
@@ -1145,9 +1146,12 @@ impl Wind {
         let mut y_out = self.out_lp2 * self.out_gain * bloom_gain;
 
         // Uilleann drones: the pipes' constant tonic drones, tonic in octaves.
-        // Cheap lowpassed-sawtooth reed oscillators, summed under the chanter and
-        // fully independent of the reed loop — always sounding while `drone_on`,
-        // so they continue between chanter notes (the constant bed of the pipes).
+        // A pipe drone is a reed on a cylindrical pipe — a hollow, mellow,
+        // ODD-harmonic tone (like a clarinet), not the brassy all-harmonic buzz
+        // of a raw sawtooth. Synthesize it additively from a few odd partials
+        // (no aliasing, no harsh edge), and let a per-sample one-pole soften the
+        // top a touch further. The three octaves are detuned a hair (in
+        // `set_drone`) so they beat slowly instead of locking into a static buzz.
         if self.drone_on {
             let mut d = 0.0;
             for i in 0..3 {
@@ -1158,10 +1162,13 @@ impl Wind {
                 if self.drone_phase[i] >= 1.0 {
                     self.drone_phase[i] -= 1.0;
                 }
-                // A sawtooth (rich, reedy harmonics), tamed by a one-pole low-pass
-                // so the drone is a warm buzz, not a fizzy edge.
-                let saw = 2.0 * self.drone_phase[i] - 1.0;
-                self.drone_lp[i] += self.drone_lp_c * (saw - self.drone_lp[i]);
+                let ph = core::f32::consts::TAU * self.drone_phase[i];
+                // Hollow reed-pipe tone: odd harmonics with a gentle rolloff.
+                let reed = mathf::sin(ph)
+                    + 0.30 * mathf::sin(3.0 * ph)
+                    + 0.12 * mathf::sin(5.0 * ph)
+                    + 0.05 * mathf::sin(7.0 * ph);
+                self.drone_lp[i] += self.drone_lp_c * (reed - self.drone_lp[i]);
                 d += self.drone_gain[i] * self.drone_lp[i];
             }
             y_out += d;
@@ -1179,8 +1186,10 @@ impl Wind {
     pub fn set_drone(&mut self, hz: f32, on: bool) {
         self.drone_on = on && self.kind == WindKind::UilleannPipes;
         if hz > 0.0 {
-            // Tenor (tonic), baritone (−1 oct), bass (−2 oct).
-            self.drone_freqs = [hz, hz * 0.5, hz * 0.25];
+            // Tenor (tonic), baritone (−1 oct), bass (−2 oct), the lower octaves
+            // detuned a few cents so their upper partials beat slowly against the
+            // tonic — a living drone bed rather than a static, phase-locked buzz.
+            self.drone_freqs = [hz, hz * 0.5 * 1.0015, hz * 0.25 * 0.9990];
         }
     }
 }
