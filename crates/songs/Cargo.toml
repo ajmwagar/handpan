@@ -1,0 +1,21 @@
+# Rendered multi-instrument pieces built from the Puget voice library.
+#
+# Proprietary. Copyright (c) 2026 Avery Wagar. All rights reserved.
+[package]
+name = "songs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Avery Wagar"]
+license-file = "../../LICENSE"
+publish = false
+
+[dependencies]
+puget-dsp = { path = "../puget-dsp" }
+plucked-core = { path = "../plucked-core" }
+bowed-core = { path = "../bowed-core" }
+wind-core = { path = "../wind-core" }
+drum-core = { path = "../drum-core" }
+
+[[bin]]
+name = "shur_journey"
+path = "src/shur_journey.rs"
