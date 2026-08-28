@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["crates/puget-dsp", "crates/puget-macro", "crates/handpan-core", "crates/handpan-plugin", "xtask", "crates/handpan-analyzer", "crates/mallet-core", "crates/bowed-core", "crates/wind-core", "crates/plucked-core", "crates/drum-core", "crates/puget-plugin", "crates/songs"]
+# Firmware targets thumbv7em-none-eabihf and builds standalone; keep it out of
+# the host workspace so `cargo build --workspace` doesn't try to cross-compile it.
+exclude = ["firmware", "vcv", "firmware-daisy", "alchemy"]
+
+[profile.release]
+lto = "thin"

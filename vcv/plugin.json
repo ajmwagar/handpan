@@ -1,0 +1,16 @@
+{
+  "slug": "PugetHandpan",
+  "name": "Puget Handpan",
+  "version": "2.0.0",
+  "license": "proprietary",
+  "brand": "Puget Audio",
+  "author": "Avery Wagar",
+  "modules": [
+    {
+      "slug": "Handpan",
+      "name": "Handpan",
+      "description": "Modal physical-modeling handpan voice with quantized V/Oct, articulations, gu, and a built-in generative player.",
+      "tags": ["Physical modeling", "Polyphonic", "Percussion", "Hardware clone"]
+    }
+  ]
+}

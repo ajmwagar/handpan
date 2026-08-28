@@ -1,0 +1,31 @@
+[package]
+name = "handpan-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Avery Wagar"]
+description = "Modal physical-modeling synthesis core for polyphonic handpans"
+license-file = "../../LICENSE"
+publish = false
+
+[features]
+default = ["std"]
+# Host builds (VSTi, tests, WAV rendering): use libstd math.
+std = ["puget-dsp/std"]
+# Embedded / firmware builds: no_std + alloc, transcendentals via libm.
+# Enable with `--no-default-features --features libm`.
+libm = ["dep:libm", "puget-dsp/libm"]
+
+[dependencies]
+# libm supplies sin/cos/exp/pow on no_std firmware builds. Host/plugin builds
+# (default = std) stay free of third-party code so the shippable voice IP does.
+libm = { version = "0.2", optional = true }
+# Internal shared DSP foundation (math + generic ensemble); no third-party deps.
+puget-dsp = { path = "../puget-dsp", default-features = false }
+
+[[example]]
+name = "render_wav"
+required-features = ["std"]
+
+[[example]]
+name = "render_choir"
+required-features = ["std"]

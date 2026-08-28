@@ -1,0 +1,61 @@
+[package]
+name = "wind-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Avery Wagar"]
+description = "Wind physical modeling (clarinet/flute/saxophone/brass) — waveguide air column + nonlinear reed/jet/lip exciter"
+license-file = "../../LICENSE"
+publish = false
+
+[features]
+default = ["std"]
+std = ["puget-dsp/std"]
+libm = ["dep:libm", "puget-dsp/libm"]
+
+[dependencies]
+libm = { version = "0.2", optional = true }
+puget-dsp = { path = "../puget-dsp", default-features = false }
+
+[[example]]
+name = "render_winds"
+required-features = ["std"]
+
+[[example]]
+name = "probe"
+required-features = ["std"]
+
+[[example]]
+name = "reed_ab"
+required-features = ["std"]
+
+[[example]]
+name = "render_ensemble"
+required-features = ["std"]
+
+[[example]]
+name = "render_didge"
+required-features = ["std"]
+
+[[example]]
+name = "render_sax"
+required-features = ["std"]
+
+[[example]]
+name = "render_ney"
+required-features = ["std"]
+
+[[example]]
+name = "render_sorna"
+required-features = ["std"]
+
+[[example]]
+name = "render_tin_whistle"
+required-features = ["std"]
+
+[[example]]
+name = "render_irish_flute"
+required-features = ["std"]
+
+[[example]]
+name = "render_uilleann"
+required-features = ["std"]

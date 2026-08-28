@@ -1,0 +1,28 @@
+[package]
+name = "handpan-firmware"
+version = "0.1.0"
+edition = "2021"
+authors = ["Avery Wagar"]
+description = "Daisy Patch.SM firmware: the handpan voice and generative brain modules"
+license-file = "../LICENSE"
+publish = false
+
+[dependencies]
+handpan-core = { path = "../crates/handpan-core", default-features = false, features = ["libm"] }
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+embedded-alloc = "0.6"
+panic-halt = "1.0"
+
+[[bin]]
+name = "handpan-voice"
+path = "src/bin/voice.rs"
+
+[[bin]]
+name = "handpan-brain"
+path = "src/bin/brain.rs"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+debug = true

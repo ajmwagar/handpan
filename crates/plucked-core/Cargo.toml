@@ -1,0 +1,45 @@
+[package]
+name = "plucked-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Avery Wagar"]
+description = "Plucked-string physical modeling (çifteli and other long-neck lutes) — Karplus-Strong strings + a bright lute body"
+license-file = "../../LICENSE"
+publish = false
+
+[features]
+default = ["std"]
+std = ["puget-dsp/std"]
+libm = ["dep:libm", "puget-dsp/libm"]
+
+[dependencies]
+libm = { version = "0.2", optional = true }
+puget-dsp = { path = "../puget-dsp", default-features = false }
+
+[[example]]
+name = "render_cifteli"
+required-features = ["std"]
+
+[[example]]
+name = "render_gayageum"
+required-features = ["std"]
+
+[[example]]
+name = "render_basitar"
+required-features = ["std"]
+
+[[example]]
+name = "render_santur"
+required-features = ["std"]
+
+[[example]]
+name = "render_tar"
+required-features = ["std"]
+
+[[example]]
+name = "render_setar"
+required-features = ["std"]
+
+[[example]]
+name = "render_barbat"
+required-features = ["std"]

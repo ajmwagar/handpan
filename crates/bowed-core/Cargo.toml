@@ -1,0 +1,37 @@
+[package]
+name = "bowed-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Avery Wagar"]
+description = "Bowed-string physical modeling (violin/viola/cello/bass) — digital-waveguide string + nonlinear stick-slip bow"
+license-file = "../../LICENSE"
+publish = false
+
+[features]
+default = ["std"]
+std = ["puget-dsp/std"]
+libm = ["dep:libm", "puget-dsp/libm"]
+
+[dependencies]
+libm = { version = "0.2", optional = true }
+puget-dsp = { path = "../puget-dsp", default-features = false }
+
+[[example]]
+name = "render_strings"
+required-features = ["std"]
+
+[[example]]
+name = "render_section"
+required-features = ["std"]
+
+[[example]]
+name = "render_kamancheh"
+required-features = ["std"]
+
+[[example]]
+name = "render_fiddle"
+required-features = ["std"]
+
+[[example]]
+name = "spike_measure"
+required-features = ["std"]

@@ -1,0 +1,6 @@
+dsp/target/
+build/
+lib/
+*.bin
+*.elf
+*.a

@@ -1,0 +1,11 @@
+# Build artifacts
+.vcv-sdk/
+build/
+dist/
+plugin.so
+plugin.dylib
+plugin.dll
+libvcv_handpan/libvcv_handpan.a
+libvcv_handpan/lib.rs.h
+libvcv_handpan/target/
+*.zip

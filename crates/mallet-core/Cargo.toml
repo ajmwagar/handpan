@@ -1,0 +1,28 @@
+[package]
+name = "mallet-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Avery Wagar"]
+description = "Polyphonic modal synthesis for mallet percussion and bells (marimba, vibraphone, glockenspiel, bells, music box, singing bowl)"
+license-file = "../../LICENSE"
+publish = false
+
+[features]
+default = ["std"]
+std = ["puget-dsp/std"]
+libm = ["dep:libm", "puget-dsp/libm"]
+
+[dependencies]
+# Same dependency-free / no_std-ready discipline as handpan-core. The modal
+# primitives here are the reusable Tier-1 core; a shared `puget-dsp` extraction
+# is the natural follow-up once a second and third instrument share them.
+libm = { version = "0.2", optional = true }
+puget-dsp = { path = "../puget-dsp", default-features = false }
+
+[[example]]
+name = "render_mallets"
+required-features = ["std"]
+
+[[example]]
+name = "render_section"
+required-features = ["std"]
